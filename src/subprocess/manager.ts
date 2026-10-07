@@ -28,6 +28,8 @@ import { trace, traceError } from "../server/trace.js";
 import type {
   RequestId,
   InitializeResponse,
+  ModelListParams,
+  ModelListResponse,
   ThreadStartResponse,
   TurnStartResponse,
   AgentMessageDeltaNotification,
@@ -53,6 +55,8 @@ export interface CodexSubprocessOptions {
   initTimeoutMs?: number;
   /** Timeout in ms for turn/start acknowledgement */
   turnStartTimeoutMs?: number;
+  /** Per-turn reasoning effort override */
+  reasoningEffort?: string;
   /** System / developer instructions */
   instructions?: string;
   /** Additional config overrides passed as `-c key=value` */
@@ -177,6 +181,12 @@ export class CodexSubprocess {
     this.sendNotification("initialized");
 
     return initResult;
+  }
+
+  /** Return the models currently advertised by the Codex app-server. */
+  async listModels(params: ModelListParams = {}): Promise<ModelListResponse> {
+    if (this.dead) throw new CodexProxyError("codex", "app-server process is dead", { detail: this.stderr });
+    return this.sendRequest<ModelListResponse>("model/list", params);
   }
 
   /** Start a Codex thread on this app-server worker. */
@@ -341,6 +351,7 @@ export class CodexSubprocess {
         threadId,
         input,
         model: options.model,
+        effort: options.reasoningEffort,
       }, options.turnStartTimeoutMs || CONFIG.turnStartTimeoutMs);
       trace("subprocess.turn_start.result", { instanceId: this.instanceId, threadId, turnStartResult });
     } catch (err) {
@@ -602,4 +613,3 @@ function cleanupTempFiles(paths: string[]): void {
     try { unlinkSync(p); } catch { /* ignore */ }
   }
 }
-

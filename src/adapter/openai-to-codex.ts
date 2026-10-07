@@ -24,6 +24,8 @@ import type { UserInput, UserImageInput } from "../types/codex.js";
 const DEFAULT_MODEL = process.env.CODEX_PROXY_DEFAULT_MODEL || "gpt-5.5";
 
 export const AVAILABLE_MODELS = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
@@ -108,6 +110,7 @@ export function chatRequestToOptions(
     imageUrls,
     options: {
       model,
+      reasoningEffort: req.reasoning_effort ?? defaults?.reasoningEffort,
       instructions: systemInstruction || defaults?.instructions,
       timeoutMs: defaults?.timeoutMs,
       initTimeoutMs: defaults?.initTimeoutMs,
@@ -143,6 +146,7 @@ export function responsesRequestToOptions(
     imageUrls,
     options: {
       model,
+      reasoningEffort: req.reasoning?.effort ?? defaults?.reasoningEffort,
       instructions: req.instructions || defaults?.instructions,
       timeoutMs: defaults?.timeoutMs,
       initTimeoutMs: defaults?.initTimeoutMs,

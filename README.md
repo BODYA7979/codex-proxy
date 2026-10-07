@@ -72,6 +72,26 @@ node dist/server/standalone.js 3470
 
 The standalone server handles `SIGINT` and `SIGTERM` by closing the HTTP server with a configurable grace period (`CODEX_PROXY_SHUTDOWN_GRACE_MS`, default `10000`).
 
+## Docker
+
+The image uses Node.js 22 and installs the official `@openai/codex` CLI (pinned by the `CODEX_CLI_VERSION` build argument). Build it, authenticate once with the device flow, then start the proxy:
+
+```bash
+docker compose build
+docker compose run --rm --no-deps codex-proxy codex login --device-auth
+docker compose up -d
+docker compose ps
+curl http://127.0.0.1:3466/health
+```
+
+Follow the URL and code printed by the login command in your browser. Login and other Codex state live in the dedicated `codex-state` volume; no host `~/.codex` directory or token file is mounted. To check authentication later, run `docker compose exec codex-proxy codex login status`.
+
+For a remote server, run the device-login command in the container and open its verification URL on your own computer. This flow does not use the browser's `127.0.0.1:1455` callback. The container needs outbound HTTPS access to `auth.openai.com` and a trusted CA bundle; the image installs Debian's `ca-certificates` package. If the device-code request still fails behind a corporate proxy, check the container's proxy settings and add your organization's CA to the image's system trust store if TLS is intercepted.
+
+In OpenCode, set the OpenAI-compatible provider's base URL to `http://127.0.0.1:3466/v1`. The Compose example binds the host port to loopback only; the proxy listens on `0.0.0.0` **inside** the container so Docker can forward that port. The endpoint has no proxy-level authentication, so put an authenticated gateway in front of it before making it reachable from another machine.
+
+Docker's healthcheck probes `/health` without consuming a Codex turn. For a one-off end-to-end check after login, use `curl http://127.0.0.1:3466/healthz/deep` (this consumes a small live turn).
+
 ## Runtime modes
 
 `codex-proxy` supports two Codex app-server runtime modes:
@@ -196,15 +216,20 @@ If Codex does not report usage, the proxy falls back to a conservative local tok
 ## Models
 
 The proxy passes model names to Codex app-server. Current default is `gpt-5.5`.
+At startup it requests every page of the app-server `model/list` catalog for `/models` and `/v1/models`. If discovery fails or returns no models, the built-in list below remains available. Restart the proxy after logging in if it was started before authentication. The catalog is a model picker, not proof that the signed-in account can run every listed model.
 
-Advertised models:
+Built-in fallback models:
 
+- `gpt-5.6-sol`
+- `gpt-5.6-terra`
 - `gpt-5.5`
 - `gpt-5.4`
 - `gpt-5.4-mini`
 - `gpt-5.3-codex`
 - `gpt-5.3-codex-spark`
 - `gpt-5.2`
+
+Reasoning effort is forwarded to Codex `turn/start`: use `reasoning_effort` with Chat Completions or `reasoning.effort` with Responses. Valid values depend on the selected model.
 
 ## OpenClaw example
 

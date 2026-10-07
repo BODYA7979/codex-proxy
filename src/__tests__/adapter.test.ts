@@ -52,6 +52,24 @@ test("chatRequestToOptions uses requested model", () => {
   assert.equal(options.model, "gpt-5.4-mini");
 });
 
+test("request option builders forward reasoning effort", () => {
+  const defaults = { reasoningEffort: "low" };
+  const chat = chatRequestToOptions({
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "Reply OK" }],
+    reasoning_effort: "high",
+  }, defaults);
+  assert.equal(chat.options.reasoningEffort, "high");
+
+  const responses = responsesRequestToOptions({
+    model: "gpt-5.5",
+    input: "Reply OK",
+    reasoning: { effort: "xhigh" },
+  }, defaults);
+  assert.equal(responses.options.reasoningEffort, "xhigh");
+  assert.equal(responsesRequestToOptions({ input: "Reply OK" }, defaults).options.reasoningEffort, "low");
+});
+
 test("request option builders preserve subprocess timeout defaults", () => {
   const defaults = {
     timeoutMs: 90_000,

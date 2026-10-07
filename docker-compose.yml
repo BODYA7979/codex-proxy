@@ -1,0 +1,23 @@
+services:
+  codex-proxy:
+    build: .
+    image: codex-proxy:local
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    ports:
+      - "127.0.0.1:3466:3466"
+    environment:
+      CODEX_PROXY_HOST: 0.0.0.0
+      CODEX_PROXY_PORT: "3466"
+      CODEX_PROXY_SANDBOX: read-only
+      CODEX_PROXY_APPROVAL_POLICY: never
+    volumes:
+      - codex-state:/home/node/.codex
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  codex-state:

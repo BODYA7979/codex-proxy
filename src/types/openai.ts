@@ -29,6 +29,7 @@ export interface ChatCompletionRequest {
   model?: string;
   messages: ChatMessage[];
   stream?: boolean;
+  reasoning_effort?: string | null;
   temperature?: number;
   max_tokens?: number;
   max_completion_tokens?: number;
@@ -169,6 +170,7 @@ export interface ResponseRequest {
   model?: string;
   input: string | ResponseInputItem[];
   stream?: boolean;
+  reasoning?: { effort?: string | null } | null;
   instructions?: string;
   temperature?: number;
   top_p?: number;

@@ -29,6 +29,9 @@
     "express": "^4.21.2",
     "uuid": "^11.0.5"
   },
+  "overrides": {
+    "qs": "6.16.0"
+  },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.7",
