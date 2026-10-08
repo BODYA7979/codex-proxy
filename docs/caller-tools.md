@@ -39,6 +39,10 @@ Caller workers therefore use a loopback Responses inference adapter as their mod
 
 Codex registers these functions using `dynamicTools` and requests their results through `item/tool/call`. The proxy never invokes their handlers. Structured calls come from model function-call items, not JSON embedded in assistant prose. An attempted native shell item is rejected before app-server receives it; widening the proxy sandbox is unnecessary.
 
+The sandbox and approval settings describe only the proxy environment. Caller instructions explicitly distinguish that environment from the external client on every inference and compaction request. Available client operations follow its supplied tools and their actual results, while user instructions and the client's own policies still apply. A read-only proxy is not a read-only client: the model must request an available client edit/write/shell operation when appropriate and report success or denial from the returned result.
+
+The adapter preserves the OpenAI provider identity used by the harness to select auto-compaction. Dedicated requests ending in `compaction_trigger` accept exactly one opaque `compaction` output; function/native tool calls are still rejected during compaction. Compaction output is not accepted as an executable tool or on ordinary inference requests.
+
 The inference adapter forwards authentication supplied by the official app-server to `https://chatgpt.com/backend-api/codex/responses`. `CODEX_PROXY_CALLER_UPSTREAM` can select an administrator-controlled compatible Responses endpoint (including a local deterministic fixture). It is not a per-request field. App-server HTTP transport is forced; WebSocket inference is disabled.
 
 ## OpenCode configuration
@@ -113,7 +117,7 @@ Correlation is isolated by a hash of the forwarded Authorization header, optiona
 | `CODEX_PROXY_TIMEOUT_MS` | `120000` | Active model/RPC turn timeout; paused while waiting for caller results |
 | `CODEX_PROXY_CALLER_UPSTREAM` | Codex ChatGPT Responses endpoint | Model endpoint behind the execution guard |
 
-Unknown, expired, duplicated, incomplete or foreign results return 400. Capacity exhaustion returns 429. A simultaneous continuation can return 409 or 400 after the first request has claimed its IDs. Disconnecting an active HTTP request cancels its worker and in-flight inference. Completed responses leave pending calls alive only until their TTL. Failed turns and shutdown close the worker, listener and temporary state. State is in memory: restart invalidates pending call IDs. After a crash, OS temporary directories may need routine cleanup; no durable/resumable caller sessions are claimed.
+Unknown, expired, duplicated, incomplete or foreign results return 400. Capacity exhaustion returns 429. A simultaneous continuation can return 409 or 400 after the first request has claimed its IDs. Disconnecting an active HTTP request cancels its worker and in-flight inference. Completed responses leave pending calls alive only until their TTL. Transient upstream failures are returned to the harness's inference retry loop without discarding the turn or resubmitting client operations. The active turn timeout still applies. Permanent failures and exhausted retries close the worker, listener and temporary state. A bounded, owner-isolated failure receipt remains for up to five minutes (or the shorter caller TTL): retrying an already-failed continuation returns 409 with its original safe error code/message instead of pretending the ID was unknown. It does not resume or re-execute that failed operation. Restart invalidates these receipts as well as live state. Shutdown closes all caller state. State is in memory: restart invalidates pending call IDs. After a crash, OS temporary directories may need routine cleanup; no durable/resumable caller sessions are claimed.
 
 Cancel an abandoned batch by calling the proxy directly with the same identity used by the gateway:
 
@@ -129,7 +133,7 @@ Cancelling any call closes its whole pending batch/session. Use the proxy's dire
 
 ## Diagnostics, tests and limits
 
-`/health` reports the configured mode; responses carry `X-Codex-Proxy-Tool-Execution-Mode`. With `CODEX_PROXY_DEBUG=1` or `CODEX_PROXY_TRACE=1`, caller events contain request ID, mode, received tool count, returned call count, or failure kind. Raw caller JSON-RPC, prompts, arguments, tool results and subprocess stderr are suppressed. Gateway logging settings are separate; the example disables gateway content logs.
+`/health` reports the configured mode; responses carry `X-Codex-Proxy-Tool-Execution-Mode`. With `CODEX_PROXY_DEBUG=1` or `CODEX_PROXY_TRACE=1`, caller events contain request ID, mode, received tool count, returned call count, or failure kind. Inference failures also produce a safe `caller.inference_failed` event with a static error code, optional numeric upstream status and retryability. Responses preserve that code; raw upstream error bodies are omitted. Raw caller JSON-RPC, prompts, arguments, tool results and subprocess stderr are suppressed. Gateway logging settings are separate; the example disables gateway content logs.
 
 Run regression tests with `npm test`. Run the real installed app-server against a deterministic local inference server with `npm run test:caller`. No paid model calls are made by this fixture.
 
@@ -140,7 +144,7 @@ CODEX_PROXY_TEST_BIFROST_IMAGE=maximhq/bifrost:latest \
 CODEX_PROXY_TEST_OPENCODE=1 npm run test:caller
 ```
 
-The test creates a temporary gateway container, client working directory, isolated OpenCode configuration and credentials-free model fixture. It covers JSON/SSE, mixed text and calls, parallel and subsequent calls, error results, choice semantics, structured output, client isolation, cancellation, TTL and a forbidden native-shell response. The OpenCode check executes only `pwd && ls` in the temporary client directory. Hybrid and legacy structured-output regressions remain in the normal suite.
+The test creates a temporary gateway container, client working directory, isolated OpenCode configuration and credentials-free model fixture. It covers JSON/SSE, mixed text and calls, parallel and subsequent calls, error results, choice semantics, structured output, client isolation, cancellation, TTL and a forbidden native-shell response. The OpenCode check executes only `pwd && ls` in the temporary client directory. Additional scenarios cover transient inference retries, permanent failure receipts, multiple agent messages without duplicate text, and forced auto-compaction through the real app-server. Hybrid and legacy structured-output regressions remain in the normal suite.
 
 Current limits: function tools with JSON object arguments only; complete result batches only; immutable model/tool catalog during a pending cycle; initial history still uses the proxy's existing prompt adapter. Caller SSE emits real OpenAI tool-call/text chunks and keepalive comments, but buffers each upstream inference until validation completes, so text tokens are delivered in a burst. A future app-server-native tool allowlist and explicit tool-choice API could remove the inference adapter and this buffering requirement.
 

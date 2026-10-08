@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { randomUUID } from "node:crypto";
+import { CallerInferenceError } from "./inference.js";
 import { CONFIG } from "../server/config.js";
 import { CALLER_RUNTIME, CallerRequestError, validateCallerRequest } from "./runtime.js";
 import { CodexProxyError, invalidRequestError, mapErrorToHttp } from "../server/errors.js";
@@ -69,8 +70,10 @@ export async function handleCallerChat(req: Request, res: Response): Promise<voi
     if (controller.signal.aborted || (error instanceof CodexProxyError && error.kind === "client_closed")) return;
     if (CONFIG.debug || CONFIG.trace) console.error(JSON.stringify({ event: "caller.failure", requestId, mode: "caller", kind: error instanceof CodexProxyError ? error.kind : "request" }));
     const mapped = error instanceof CallerRequestError
-      ? { status: error.status, body: invalidRequestError(error.message) }
-      : mapErrorToHttp(error, false);
+      ? { status: error.status, body: { error: { ...invalidRequestError(error.message).error, code: error.code } } }
+      : error instanceof CallerInferenceError
+        ? { status: 502, body: { error: { type: "server_error" as const, code: error.code, message: error.message } } }
+        : mapErrorToHttp(error, false);
     if (!res.headersSent) res.status(mapped.status).json(mapped.body);
     else if (!res.destroyed && !res.writableEnded) {
       res.write(`data: ${JSON.stringify(mapped.body)}\n\n`); res.write(SSE_DONE); res.end();

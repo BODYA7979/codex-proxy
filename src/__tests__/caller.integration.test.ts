@@ -28,6 +28,10 @@ function sse(output: Record<string, unknown>[]): string {
   let stream = `data: ${JSON.stringify({ type: "response.created", response: { ...response, status: "in_progress", output: [] } })}\n\n`;
   output.forEach((item, output_index) => {
     stream += `data: ${JSON.stringify({ type: "response.output_item.added", output_index, item: { ...item, arguments: item.arguments === undefined ? undefined : "" } })}\n\n`;
+    if (item.type === "message") {
+      const text = ((item.content as any[]) || []).map(part => part.text || "").join("");
+      stream += `data: ${JSON.stringify({ type: "response.output_text.delta", output_index, item_id: item.id, content_index: 0, delta: text })}\n\n`;
+    }
     stream += `data: ${JSON.stringify({ type: "response.output_item.done", output_index, item })}\n\n`;
   });
   return stream + `data: ${JSON.stringify({ type: "response.completed", response })}\n\n`;
@@ -67,6 +71,7 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
   const directory = await mkdtemp(join(tmpdir(), "codex-caller-integration-"));
   const forbiddenMarker = join(directory, "native-shell-must-not-run");
   let container: string | undefined;
+  let transientFailures = 0;
   const upstream = createServer(async (req, res) => {
     try {
       let raw = ""; for await (const chunk of req) raw += chunk;
@@ -75,6 +80,8 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
       const text = JSON.stringify(body.input);
       const outputs = body.input.filter((item: any) => item.type === "function_call_output");
       let output: Record<string, unknown>[];
+      if (text.includes("SCENARIO:transient-failure") && outputs.length && transientFailures++ === 0) { res.writeHead(503).end("temporary fixture failure"); return; }
+      if (text.includes("SCENARIO:upstream-failure") && outputs.length) { res.writeHead(400).end("non-retryable fixture rejection"); return; }
       if (text.includes("SCENARIO:blocked")) output = [{ ...call(0, "native", { command: `touch ${forbiddenMarker}` }), name: "exec_command" }];
       else if (text.includes("SCENARIO:cancel-active")) { await sleep(700); output = [message("Cancelled inference")]; }
       else if (body.tool_choice === "none") output = [message('{"ok":true}')];
@@ -121,7 +128,7 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
         const a = await completion(target.url, messages, "tenant-a", streaming, target.extra);
         assert.equal(a.status, 200, JSON.stringify(a.body));
         const assistant = a.body.choices[0].message;
-        assert.match(assistant.content, /Checking client/); assert.equal(assistant.tool_calls.length, 2);
+        assert.equal(assistant.content, "Checking client directory. "); assert.equal(assistant.tool_calls.length, 2);
         assert.deepEqual(assistant.tool_calls.map((c: any) => c.function.name), ["bash", "read"]);
         assert.equal(a.body.choices[0].finish_reason, "tool_calls");
         assert.notEqual(assistant.tool_calls[0].id, assistant.tool_calls[1].id);
@@ -129,7 +136,7 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
         const foreign = await completion(target.url, messages, "tenant-b", false, target.extra);
         assert.equal(foreign.status, 400, JSON.stringify(foreign.body));
         const b = await completion(target.url, messages, "tenant-a", streaming, target.extra);
-        assert.equal(b.status, 200, JSON.stringify(b.body)); assert.match(b.body.choices[0].message.content, /Retrying/);
+        assert.equal(b.status, 200, JSON.stringify(b.body)); assert.equal(b.body.choices[0].message.content, "Retrying after client error. ");
         const next = b.body.choices[0].message; assert.equal(next.tool_calls.length, 1);
         messages.push(next, { role: "tool", tool_call_id: next.tool_calls[0].id, content: "client contents" });
         const c = await completion(target.url, messages, "tenant-a", streaming, target.extra);
@@ -137,6 +144,38 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
         assert.match(c.body.choices[0].message.content, /client contents/); assert.match(c.body.choices[0].message.content, /ERROR/);
       });
     }
+
+    await t.test("transient inference failure preserves the running caller turn and client result", async () => {
+      const messages: ChatMessage[] = [{ role: "user", content: "SCENARIO:transient-failure" }];
+      const first = await completion(direct, messages, "transient-owner", false);
+      const assistant = first.body.choices[0].message;
+      messages.push(assistant, { role: "tool", tool_call_id: assistant.tool_calls[0].id, content: "client operation ran exactly once" });
+      const result = await completion(direct, messages, "transient-owner", true);
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.equal(result.body.choices[0].finish_reason, "stop");
+      assert.match(result.body.choices[0].message.content, /client operation ran exactly once/);
+      assert.equal(result.body.choices[0].message.tool_calls, undefined);
+      assert.ok(transientFailures >= 2, "the harness must retry inference");
+    });
+
+    await t.test("failed continuation retries retain the primary error without resubmitting results", async () => {
+      const messages: ChatMessage[] = [{ role: "user", content: "SCENARIO:upstream-failure" }];
+      const first = await completion(direct, messages, "retry-owner", false);
+      const assistant = first.body.choices[0].message;
+      messages.push(assistant, { role: "tool", tool_call_id: assistant.tool_calls[0].id, content: "completed client result" });
+      const failed = await completion(direct, messages, "retry-owner", false);
+      assert.equal(failed.status, 502);
+      assert.equal(failed.body.error.code, "caller_upstream_http_error");
+      const before = requests.length;
+      const retry = await completion(direct, messages, "retry-owner", false);
+      assert.equal(retry.status, 409);
+      assert.equal(retry.body.error.code, "caller_upstream_http_error");
+      assert.match(retry.body.error.message, /Previous caller continuation failed.*HTTP 400/);
+      assert.equal(requests.length, before);
+      const foreign = await completion(direct, messages, "other-owner", false);
+      assert.equal(foreign.status, 400);
+      assert.doesNotMatch(foreign.body.error.message, /400/);
+    });
 
     await t.test("required selects second tool; named and none choices; structured final output", async () => {
       for (const choice of ["required", { type: "function", function: { name: "read" } }] as const) {
@@ -225,4 +264,56 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
     Object.assign(CONFIG, saved);
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("real app-server auto-compaction resumes caller inference after a large tool result", { skip: !enabled, timeout: 60_000 }, async () => {
+  const { CallerInference } = await import("../caller/inference.js");
+  const { CodexSubprocess } = await import("../subprocess/manager.js");
+  const directory = await mkdtemp(join(tmpdir(), "caller-compact-integration-"));
+  let compactRequests = 0;
+  let ordinaryRequests = 0;
+  const upstream = createServer(async (req, res) => {
+    let raw = ""; for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw);
+    const compact = body.input?.at(-1)?.type === "compaction_trigger";
+    let output: Record<string, unknown>[];
+    if (compact) {
+      compactRequests++;
+      assert.equal(body.tool_choice, "auto");
+      output = [{ type: "compaction", id: "cmp_fixture", encrypted_content: "opaque-fixture-compacted-history" }];
+    } else {
+      ordinaryRequests++;
+      output = ordinaryRequests === 1 ? [call(0, "large_result", { path: "fixture.txt" })] : [message("Continued after compacting client results.")];
+    }
+    let response = sse(output);
+    if (!compact && ordinaryRequests === 1) response = response.replaceAll('"input_tokens":10', '"input_tokens":6500').replaceAll('"total_tokens":20', '"total_tokens":6510');
+    res.writeHead(200, { "content-type": "text/event-stream" }).end(response);
+  });
+  const worker = new CodexSubprocess();
+  let failure: Error | undefined;
+  const adapter = new CallerInference([tools[1]], `http://127.0.0.1:${await listen(upstream)}`, () => {}, error => { failure = error; worker.kill(); });
+  try {
+    const base = await adapter.start();
+    const options = {
+      model: "gpt-6.1-sol", cwd: directory, timeoutMs: 20_000,
+      envOverrides: { CODEX_HOME: directory, OPENAI_API_KEY: "sk-caller-fixture-not-a-real-key" },
+      configOverrides: {
+        model_provider: '"caller"', 'model_providers.caller.name': '"OpenAI"',
+        'model_providers.caller.base_url': JSON.stringify(base), 'model_providers.caller.wire_api': '"responses"',
+        'model_providers.caller.requires_openai_auth': "true", 'model_providers.caller.supports_websockets': "false",
+        'model_auto_compact_token_limit': "6000", 'features.enable_request_compression': "false",
+        'features.hooks': "false", 'features.plugins': "false", 'features.apps': "false", 'features.code_mode': "false", 'features.code_mode_host': "false",
+      },
+      caller: {
+        dynamicTools: [{ type: "function" as const, name: "caller_tool_0", description: "Read on client", inputSchema: tools[1].function.parameters }],
+        onToolCall: (request: { id: number | string; params: Record<string, unknown> }) => worker.respondToCallerTool(request.id, "large client result ".repeat(7000)),
+      },
+    };
+    await worker.start(options);
+    const result = await worker.submitTurn("Read the client fixture and answer after its result.", options);
+    assert.equal(failure, undefined);
+    assert.ok(compactRequests > 0, "the real harness must have requested compaction");
+    assert.equal(ordinaryRequests, 2);
+    assert.equal(result.text, "Continued after compacting client results.");
+  } finally { worker.kill(); await worker.waitForExit(); adapter.close(); await close(upstream); await rm(directory, { recursive: true, force: true }); }
 });

@@ -38,7 +38,7 @@ test("inference boundary removes all native tools and honors all tool_choice val
   const converted = adapter.rewriteRequest(input);
   assert.equal(converted.tool_choice, "required");
   assert.deepEqual((converted.tools as Array<{ name: string }>).map(tool => tool.name), ["caller_tool_0", "caller_tool_1"]);
-  assert.equal((converted.input as unknown[]).length, 1);
+  assert.equal((converted.input as unknown[]).length, 2);
   assert.equal(adapter.validateResponse(stream([call()]))[0].name, "read"); // required chooses second tool
   assert.throws(() => adapter.validateResponse(stream([])), /tool_choice/);
   adapter.setChoice({ type: "function", function: { name: "bash" } });
@@ -126,4 +126,31 @@ test("Responses API rejects caller mode instead of bypassing the execution bound
     const explicit = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: "Read a file", codex_proxy: { tool_execution_mode: "caller" } }) });
     assert.equal(explicit.status, 400);
   } finally { CONFIG.toolExecutionMode = previous; api.closeAllConnections(); await new Promise<void>(resolve => api.close(() => resolve())); }
+});
+
+test("caller permissions stay scoped to the proxy while client operations depend on tools/results", () => {
+  const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
+  const original = { tools: [], input: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "The proxy filesystem sandbox is read-only" }] }, { type: "message", role: "user", content: "Edit the client file" }] };
+  const converted = adapter.rewriteRequest(original);
+  const input = converted.input as any[];
+  assert.deepEqual(input[0], original.input[0]);
+  assert.equal(input.at(-1).role, "developer");
+  const policy = input.at(-1).content[0].text;
+  assert.match(policy, /ONLY the proxy\/app-server environment/);
+  assert.match(policy, /supplied tools and their actual results/);
+  assert.match(policy, /Do not declare the client read-only/);
+  assert.match(policy, /specific failed client operation/);
+});
+
+test("compaction is accepted only for app-server's dedicated trigger and cannot execute tools", () => {
+  const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
+  adapter.setChoice("required");
+  const converted = adapter.rewriteRequest({ input: [{ type: "message", role: "user", content: "History" }, { type: "compaction_trigger" }] });
+  assert.equal(converted.tool_choice, "auto");
+  assert.equal((converted.input as any[]).at(-1).type, "compaction_trigger");
+  const compact = stream([{ type: "compaction", id: "cmp_1", encrypted_content: "opaque-fixture" }]);
+  assert.deepEqual(adapter.validateResponse(compact, true), []);
+  assert.throws(() => adapter.validateResponse(compact), /forbidden/);
+  assert.throws(() => adapter.validateResponse(stream([call()]), true), /non-compaction/);
+  assert.throws(() => adapter.validateResponse(stream([{ type: "compaction", encrypted_content: "" }]), true), /encrypted/);
 });

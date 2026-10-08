@@ -112,6 +112,39 @@ export function appendAssistantText(current: string, candidate: string | null): 
   return current + candidate;
 }
 
+/** Deduplicate completion snapshots per agent item, not against the whole turn.
+ * Tool continuations can contain several messages, each with deltas + a final
+ * snapshot. Equal text from distinct items is still legitimate assistant text.
+ */
+export class AssistantMessageCollector {
+  text = "";
+  private readonly items = new Map<string, string>();
+  private legacyIndex = 0;
+
+  delta(itemId: string | undefined, delta: string): string {
+    const key = itemId || `legacy:${this.legacyIndex}`;
+    this.items.set(key, (this.items.get(key) || "") + delta);
+    this.text += delta;
+    return delta;
+  }
+
+  complete(itemId: string | undefined, candidate: string | null): string {
+    if (!candidate) return "";
+    const legacyKey = `legacy:${this.legacyIndex}`;
+    const key = itemId || legacyKey;
+    const previous = this.items.get(key) ?? this.items.get(legacyKey) ?? "";
+    const next = previous.startsWith(candidate) ? previous : appendAssistantText(previous, candidate);
+    const missing = next.slice(previous.length);
+    this.items.set(key, next);
+    if (!itemId || this.items.has(legacyKey)) {
+      if (itemId) this.items.delete(legacyKey);
+      this.legacyIndex++;
+    }
+    this.text += missing;
+    return missing;
+  }
+}
+
 // ── Chat Completions ─────────────────────────────────────────────────
 
 /** Build a non-streaming chat completion response from a TurnResult. */

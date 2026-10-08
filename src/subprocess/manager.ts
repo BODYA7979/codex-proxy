@@ -17,7 +17,7 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { v4 as uuid } from "uuid";
-import { appendAssistantText, extractDeltaText } from "../adapter/codex-to-openai.js";
+import { AssistantMessageCollector, extractDeltaText } from "../adapter/codex-to-openai.js";
 import { CONFIG } from "../server/config.js";
 import type { UserInput, UserImageInput } from "../types/codex.js";
 import { CodexProxyError } from "../server/errors.js";
@@ -262,7 +262,7 @@ export class CodexSubprocess {
     let tokenUsage: TokenUsageBreakdown | null = null;
 
     // Collect assistant text from streamed deltas
-    let assistantText = "";
+    const assistant = new AssistantMessageCollector();
 
     let timeout: NodeJS.Timeout;
     let handler: (method: string, params: unknown) => void;
@@ -289,6 +289,7 @@ export class CodexSubprocess {
 
       handler = (method: string, params: unknown) => {
         const p = params as Record<string, unknown>;
+        if (!p || typeof p !== "object") return;
         if (p.threadId !== threadId) return;
         this.log("subprocess.notification.dispatch", { instanceId: this.instanceId, threadId, method, params });
         notificationCallback?.(method, params);
@@ -296,22 +297,17 @@ export class CodexSubprocess {
         switch (method) {
           case "item/agentMessage/delta": {
             const delta = extractDeltaText(p) || (p as unknown as AgentMessageDeltaNotification).delta;
-            assistantText += delta;
-            this.log("subprocess.agent_delta", { instanceId: this.instanceId, threadId, delta, assistantTextLength: assistantText.length });
+            if (typeof delta !== "string") break;
+            assistant.delta(typeof p.itemId === "string" ? p.itemId : undefined, delta);
+            this.log("subprocess.agent_delta", { instanceId: this.instanceId, threadId, delta, assistantTextLength: assistant.text.length });
             deltaCallback?.(delta);
             break;
           }
           case "item/completed": {
             const completedText = extractDeltaText(p as unknown as ItemCompletedNotification);
-            const previousText = assistantText;
-            const nextText = appendAssistantText(assistantText, completedText);
-            if (nextText !== previousText && completedText) {
-              const delta = completedText.startsWith(previousText)
-                ? completedText.slice(previousText.length)
-                : completedText;
-              if (delta) deltaCallback?.(delta);
-            }
-            assistantText = nextText;
+            const item = p.item as { id?: string } | undefined;
+            const missing = assistant.complete(item?.id, completedText);
+            if (missing) deltaCallback?.(missing);
             break;
           }
           case "thread/tokenUsage/updated": {
@@ -331,15 +327,17 @@ export class CodexSubprocess {
               : tc.turn.status === "failed"
                   ? "error"
                   : "stop";
-            if (!assistantText) {
-              const items = Array.isArray(tc.turn.items) ? tc.turn.items : [];
-              for (const item of items) {
-                assistantText = appendAssistantText(assistantText, extractDeltaText({ item }));
+            const hadText = Boolean(assistant.text);
+            const items = Array.isArray(tc.turn.items) ? tc.turn.items : [];
+            for (const item of items) {
+              if (item.id || !hadText) {
+                const missing = assistant.complete(item.id, extractDeltaText({ item }));
+                if (missing) deltaCallback?.(missing);
               }
             }
 
             const result = {
-              text: assistantText,
+              text: assistant.text,
               turnId: tc.turn.id,
               threadId,
               usage: tokenUsage,
@@ -399,6 +397,7 @@ export class CodexSubprocess {
         input,
         model: options.model,
         effort: options.reasoningEffort,
+        ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
       }, options.turnStartTimeoutMs || CONFIG.turnStartTimeoutMs);
       this.log("subprocess.turn_start.result", { instanceId: this.instanceId, threadId, turnStartResult });
     } catch (err) {

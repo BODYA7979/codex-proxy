@@ -9,13 +9,14 @@ import { CodexSubprocess, type TurnResult, type CodexSubprocessOptions } from ".
 import type { ChatCompletionRequest, ChatCompletionToolCall, ChatCompletionTool } from "../types/openai.js";
 import { chatMessagesToPrompt } from "../adapter/openai-to-codex.js";
 import { CONFIG } from "../server/config.js";
-import { CodexProxyError } from "../server/errors.js";
+import { CodexProxyError, mapErrorToHttp } from "../server/errors.js";
 import type { RequestId } from "../types/codex.js";
 import { linkCallerCredentials } from "./credentials.js";
-import { CallerInference, type ModelToolCall } from "./inference.js";
+import { CALLER_PERMISSION_INSTRUCTIONS } from "./policy.js";
+import { CallerInference, CallerInferenceError, type ModelToolCall } from "./inference.js";
 
 export class CallerRequestError extends Error {
-  constructor(message: string, readonly status = 400) { super(message); }
+  constructor(message: string, readonly status = 400, readonly code = "invalid_request") { super(message); }
 }
 
 export function validateCallerRequest(body: ChatCompletionRequest): void {
@@ -72,6 +73,7 @@ class CallerSession {
   modelTurnId: string = this.id;
   busy = true;
   closed = false;
+  lastContinuationIds: string[] = [];
   private done?: TurnResult;
   private failure?: Error;
   private wake?: () => void;
@@ -119,7 +121,7 @@ class CallerSession {
     const baseUrl = await this.inference.start();
     if (this.closed) throw new CodexProxyError("client_closed", "Caller cancelled");
     const { prompt, systemInstruction, imageInputs } = chatMessagesToPrompt(body.messages);
-    const instructions = [systemInstruction, "You are responding to an external client. Use the supplied caller tools for all operations. Their paths and working directory belong to the client. Tool results can require further calls. Return ordinary assistant text separately from tool calls."].filter(Boolean).join("\n");
+    const instructions = [systemInstruction, CALLER_PERMISSION_INSTRUCTIONS, "You are responding to an external client. Use the supplied caller tools for all operations. Their paths and working directory belong to the client. Tool results can require further calls. Return ordinary assistant text separately from tool calls."].filter(Boolean).join("\n");
     const options: CodexSubprocessOptions = {
       model: this.model, cwd: this.directory, instructions,
       reasoningEffort: body.reasoning_effort || undefined,
@@ -128,7 +130,9 @@ class CallerSession {
       envOverrides: { CODEX_HOME: this.directory },
       configOverrides: {
         model_provider: '"caller"',
-        'model_providers.caller.name': '"Caller inference boundary"',
+        // Harness compaction uses OpenAI provider identity. The localhost base
+        // URL still enforces caller-only execution before any output reaches it.
+        'model_providers.caller.name': '"OpenAI"',
         'model_providers.caller.base_url': JSON.stringify(baseUrl),
         'model_providers.caller.wire_api': '"responses"',
         'model_providers.caller.requires_openai_auth': "true",
@@ -177,7 +181,13 @@ class CallerSession {
     if (this.calls.size && [...this.calls.values()].every(call => call.result !== undefined && call.rpcId !== undefined)) this.calls.clear();
   }
 
-  fail(error: Error): void { this.failure = new CodexProxyError("protocol", "Caller tool bridge failed", { cause: error }); this.wake?.(); this.close(); }
+  get failureReason(): Error | undefined { return this.failure; }
+  fail(error: Error): void {
+    if (this.failure || this.closed) return;
+    const reason = error instanceof CodexProxyError && (error.kind === "codex" || error.kind === "protocol") ? this.inference.lastFailure || error : error;
+    this.failure = reason instanceof CodexProxyError ? reason : new CodexProxyError("protocol", "Caller tool bridge failed", { cause: reason });
+    this.wake?.(); this.close();
+  }
   close(): void {
     const wasClosed = this.closed;
     this.closed = true;
@@ -213,6 +223,9 @@ export class CallerRuntime {
   private readonly pending = new Map<string, CallerSession>();
   private versionCheck?: Promise<void>;
   private readonly cleanups = new Set<Promise<void>>();
+  // Retain only safe failure metadata for SDK retries, never tool outputs or
+  // credentials. A failed continuation must not masquerade as an unknown ID.
+  private readonly failures = new Map<string, { owner: string; expiresAt: number; code: string; message: string }>();
   private async checkVersion(): Promise<void> {
     this.versionCheck ||= promisify(execFile)(CONFIG.codexBin, ["--version"], { timeout: CONFIG.initTimeoutMs }).then(({ stdout }) => {
       if (!supportsCallerVersion(stdout)) throw new CallerRequestError("caller mode requires Codex app-server 0.162.0-alpha.2 or newer", 503);
@@ -223,18 +236,25 @@ export class CallerRuntime {
   async run(req: Request, signal: AbortSignal): Promise<TurnResult & { toolCalls?: ChatCompletionToolCall[] }> {
     const body = req.body as ChatCompletionRequest;
     validateCallerRequest(body);
+    for (const [id, receipt] of this.failures) if (receipt.expiresAt <= Date.now()) this.failures.delete(id);
     const trailing = [];
     for (let i = body.messages.length - 1; i >= 0 && body.messages[i].role === "tool"; i--) trailing.unshift(body.messages[i]);
     let session: CallerSession;
     if (trailing.length) {
       const found = this.pending.get(trailing[0].tool_call_id || "");
-      if (!found || found.owner !== identity(req)) throw new CallerRequestError("Unknown, expired or foreign tool_call_id");
+      if (!found) {
+        const receipt = this.failures.get(trailing[0].tool_call_id || "");
+        if (receipt?.owner === identity(req)) throw new CallerRequestError(`Previous caller continuation failed: ${receipt.message}`, 409, receipt.code);
+        throw new CallerRequestError("Unknown, expired or foreign tool_call_id");
+      }
+      if (found.owner !== identity(req)) throw new CallerRequestError("Unknown, expired or foreign tool_call_id");
       session = found;
       if (session.busy) throw new CallerRequestError("Caller continuation is already active", 409);
       if (session.model !== (body.model || CONFIG.defaultModel) || catalog(session.tools) !== catalog(body.tools)) throw new CallerRequestError("Caller continuation must preserve model and tool definitions");
       const ids = trailing.map(message => message.tool_call_id || "");
       if (new Set(ids).size !== session.calls.size || ids.length !== session.calls.size || ids.some(id => !session.calls.has(id))) throw new CallerRequestError("Return exactly one result for every pending tool_call_id");
       session.busy = true;
+      session.lastContinuationIds = ids;
       if (session.timer) clearTimeout(session.timer);
       for (const id of ids) this.pending.delete(id);
       const outputs = trailing.map(message => ({ id: message.tool_call_id!, text: typeof message.content === "string" ? message.content : JSON.stringify(message.content) }));
@@ -246,6 +266,12 @@ export class CallerRuntime {
       if (this.sessions.size + this.cleanups.size >= CONFIG.callerMaxSessions) throw new CallerRequestError("Caller session capacity reached; retry after a pending call completes or expires", 429);
       session = new CallerSession(identity(req), body.model || CONFIG.defaultModel, body.tools || [], () => {
         this.sessions.delete(session);
+        if (session.failureReason && session.lastContinuationIds.length) {
+          const reason = session.failureReason;
+          const safe = reason instanceof CallerInferenceError ? { code: reason.code, message: reason.message } : mapErrorToHttp(reason, false).body.error;
+          for (const id of session.lastContinuationIds) this.failures.set(id, { owner: session.owner, expiresAt: Date.now() + Math.min(CONFIG.callerTtlMs, 300_000), code: safe.code, message: safe.message });
+          while (this.failures.size > CONFIG.callerMaxSessions * 8) this.failures.delete(this.failures.keys().next().value!);
+        }
         for (const [id, owner] of this.pending) if (owner === session) this.pending.delete(id);
       }, cleanup => {
         this.cleanups.add(cleanup);
@@ -262,6 +288,7 @@ export class CallerRuntime {
       if (!session.directory) { await this.checkVersion(); await session.start(body); }
       const result = await session.segment();
       if (result.toolCalls?.length) {
+        session.lastContinuationIds = [];
         session.busy = false;
         for (const call of result.toolCalls) this.pending.set(call.id, session);
         session.timer = setTimeout(() => session.close(), CONFIG.callerTtlMs);
@@ -282,6 +309,7 @@ export class CallerRuntime {
   async drain(): Promise<void> {
     for (const session of this.sessions) session.close();
     await Promise.allSettled([...this.cleanups]);
+    this.failures.clear();
   }
 }
 

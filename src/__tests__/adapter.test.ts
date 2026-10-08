@@ -870,3 +870,27 @@ test("responsesRequestToOptions handles reasoning with summary_text content part
   assert.match(prompt, /<reasoning>/);
   assert.match(prompt, /weather forecast for multiple cities/);
 });
+
+test("agent messages around tool calls emit each delta/completion snapshot once", async () => {
+  const { AssistantMessageCollector } = await import("../adapter/codex-to-openai.js");
+  const text = new AssistantMessageCollector();
+  const emitted = [
+    text.delta("before", "Checking. "), text.complete("before", "Checking. "),
+    text.delta("after", "Done"), text.delta("after", "."), text.complete("after", "Done."),
+    text.complete("after", "Done."),
+    // Equal content from a distinct message is not a duplicate notification.
+    text.complete("other", "Done."),
+  ].join("");
+  assert.equal(emitted, "Checking. Done.Done.");
+  assert.equal(text.text, emitted);
+});
+
+test("agent completion emits missing suffixes and tolerates legacy deltas without IDs", async () => {
+  const { AssistantMessageCollector } = await import("../adapter/codex-to-openai.js");
+  const text = new AssistantMessageCollector();
+  text.delta(undefined, "Par");
+  assert.equal(text.complete("first", "Partial"), "tial");
+  assert.equal(text.complete("second", "Next"), "Next");
+  assert.equal(text.complete("second", "Ne"), "");
+  assert.equal(text.text, "PartialNext");
+});
