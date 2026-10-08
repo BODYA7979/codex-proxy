@@ -46,6 +46,14 @@ Streaming endpoints may include SSE comment keepalives:
 
 These comments do not carry JSON data and should be ignored by SSE clients.
 
+## Caller tool execution
+
+With `CODEX_PROXY_TOOL_EXECUTION_MODE=caller` (or a Chat Completions request override), initialization opts into `experimentalApi`; `thread/start` registers client function schemas through `dynamicTools`. A dedicated inference adapter enforces the allowed tool list and `tool_choice` before app-server receives model output. Calls use internal aliases and are returned to OpenAI clients with original names and random stable call IDs.
+
+`item/tool/call` is a server RPC request awaiting `DynamicToolCallResponse`. HTTP returns `message.tool_calls` or indexed SSE `delta.tool_calls` with `finish_reason: "tool_calls"`, retaining assistant text. The following HTTP request supplies a complete batch of `role: "tool"` messages. Matching results resolve those RPCs as `{contentItems:[{type:"inputText",text:...}],success:true}`. The original running turn continues and can request another batch; client result messages are not flattened for this continuation.
+
+Caller sessions are separate from hybrid/sticky workers, isolated by client identity and pending IDs, bounded by capacity and idle TTL, and closed on disconnect, explicit cancellation, failure or shutdown. SSE inference is buffered at the execution guard before validated events enter app-server. See [caller tools](docs/caller-tools.md) for lifecycle and runtime limits.
+
 ## Responses
 
 `/v1/responses` accepts text input or a minimal input item array. It maps the final Codex turn to:

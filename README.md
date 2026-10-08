@@ -92,6 +92,12 @@ In OpenCode, set the OpenAI-compatible provider's base URL to `http://127.0.0.1:
 
 Docker's healthcheck probes `/health` without consuming a Codex turn. For a one-off end-to-end check after login, use `curl http://127.0.0.1:3466/healthz/deep` (this consumes a small live turn).
 
+## Caller-executed tools (OpenCode)
+
+Use `CODEX_PROXY_TOOL_EXECUTION_MODE=caller` when OpenCode should execute all tools on its own machine. Chat Completions uses app-server dynamic tools and an inference adapter that blocks native Codex tool calls, returns standard JSON/SSE `tool_calls`, and correlates subsequent tool results with isolated TTL-limited workers. `hybrid` remains the default.
+
+See [caller tools setup](docs/caller-tools.md) for the supported app-server version, OpenCode/Bifrost configuration, cancellation, tests and buffering limits.
+
 ## Runtime modes
 
 `codex-proxy` supports two Codex app-server runtime modes:

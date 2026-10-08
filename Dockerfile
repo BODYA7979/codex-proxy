@@ -11,7 +11,7 @@ RUN npm run build
 
 FROM node:22-bookworm-slim
 
-ARG CODEX_CLI_VERSION=0.160.0
+ARG CODEX_CLI_VERSION=0.162.0-alpha.2
 ENV NODE_ENV=production \
     CODEX_HOME=/home/node/.codex \
     CODEX_PROXY_HOST=0.0.0.0 \

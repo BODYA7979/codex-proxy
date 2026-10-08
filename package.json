@@ -10,7 +10,8 @@
     "dev": "tsc --watch",
     "smoke": "scripts/smoke.sh",
     "test": "node --test dist/__tests__/*.test.js",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "test:caller": "npm run build && CODEX_PROXY_CALLER_INTEGRATION=1 node --test dist/__tests__/caller.integration.test.js"
   },
   "keywords": [
     "codex",

@@ -70,6 +70,7 @@ export function chatMessagesToPrompt(messages: ChatMessage[]): {
         break;
       case "assistant":
         parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
+        if (msg.tool_calls?.length) parts.push(`<previous_tool_calls>\n${JSON.stringify(msg.tool_calls)}\n</previous_tool_calls>\n`);
         break;
       case "tool": {
         const toolName = msg.name || "unknown";
@@ -311,7 +312,7 @@ export function requestedFunctionTool(req: Pick<ChatCompletionRequest, "tools" |
     return tools.find((tool) => tool.function.name === choice.function.name) || null;
   }
 
-  if (choice === "required") return tools[0];
+  if (choice === "required" && tools.length === 1 && isSchemaStyleTool(tools[0])) return tools[0];
 
   // LangChain structured-output calls commonly provide exactly one synthetic
   // schema function and omit tool_choice / use auto. Ordinary agent tool loops
@@ -391,7 +392,7 @@ To request external tools, return a valid JSON object in this exact shape for ea
 You may emit multiple tool_call objects in a single response to invoke several tools in parallel. Place each on its own line or separate them with whitespace.
 Use one of the external tool names listed below and fill arguments according to its schema.
 Do not treat this bridge as replacing or disabling Codex-native tools/capabilities. Use your native Codex capabilities whenever they are useful, and request an external OpenAI/OpenClaw tool only when the caller-dispatched tool is the right source or action.
-If a <tool_result> is present, consume it to answer the user's request; do NOT repeat the same external tool call unless the user explicitly asks for another call.
+Consume <tool_result> messages as tool outputs. Request further tools whenever the task requires them, including retries after errors.
 If no external tool is needed, answer normally and do not use this JSON shape.
 External tools:
 ${JSON.stringify(tools)}

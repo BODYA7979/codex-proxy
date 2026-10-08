@@ -1,4 +1,8 @@
 export interface ProxyConfig {
+  toolExecutionMode: "caller" | "hybrid";
+  callerTtlMs: number;
+  callerMaxSessions: number;
+  callerUpstream: string;
   host: string;
   port: number;
   maxBodySize: string;
@@ -41,7 +45,13 @@ type Env = Record<string, string | undefined>;
 
 export function parseConfig(env: Env = process.env): ProxyConfig {
   const defaultTimeoutMs = parsePositiveInt(env.CODEX_PROXY_TIMEOUT_MS, 120_000);
+  const toolExecutionMode = env.CODEX_PROXY_TOOL_EXECUTION_MODE || "hybrid";
+  if (toolExecutionMode !== "caller" && toolExecutionMode !== "hybrid") throw new Error("CODEX_PROXY_TOOL_EXECUTION_MODE must be caller or hybrid");
   return {
+    toolExecutionMode,
+    callerTtlMs: parsePositiveInt(env.CODEX_PROXY_CALLER_TTL_MS, 600_000),
+    callerMaxSessions: parsePositiveInt(env.CODEX_PROXY_CALLER_MAX_SESSIONS, 32),
+    callerUpstream: env.CODEX_PROXY_CALLER_UPSTREAM || "https://chatgpt.com/backend-api/codex/responses",
     host: env.CODEX_PROXY_HOST || "127.0.0.1",
     port: parsePort(env.CODEX_PROXY_PORT, 3466),
     maxBodySize: env.CODEX_PROXY_MAX_BODY || "8mb",

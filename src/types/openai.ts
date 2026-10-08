@@ -8,6 +8,7 @@ export type CodexProxySessionMode = "pool" | "sticky" | "stateless";
 export type CodexProxySessionPolicy = "strict" | "compatible";
 
 export interface CodexProxyRequestExtension {
+  tool_execution_mode?: "caller" | "hybrid";
   session?: string;
   sessionKey?: string;
   session_key?: string;
@@ -26,6 +27,7 @@ export interface CodexProxyRequestExtension {
 }
 
 export interface ChatCompletionRequest {
+  tool_execution_mode?: "caller" | "hybrid";
   model?: string;
   messages: ChatMessage[];
   stream?: boolean;
@@ -167,6 +169,7 @@ export interface ResponseUsage {
 // ── Responses API ───────────────────────────────────────────────────
 
 export interface ResponseRequest {
+  tool_execution_mode?: "caller" | "hybrid";
   model?: string;
   input: string | ResponseInputItem[];
   stream?: boolean;

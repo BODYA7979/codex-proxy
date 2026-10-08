@@ -1,3 +1,4 @@
+import { CALLER_RUNTIME } from "../caller/runtime.js";
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { createServer, type Server } from "node:http";
 import { v4 as uuid } from "uuid";
@@ -26,7 +27,7 @@ export function createApp(options: Pick<ServerOptions, "maxBodySize"> = {}): Exp
       if (origin && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin)) {
         res.setHeader("Access-Control-Allow-Origin", origin);
         res.setHeader("Vary", "Origin");
-        res.setHeader("Access-Control-Allow-Headers", "content-type, authorization, x-request-id, x-codex-proxy-session");
+        res.setHeader("Access-Control-Allow-Headers", "content-type, authorization, x-request-id, x-codex-proxy-session, x-codex-proxy-client-id");
         res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
       }
       if (req.method === "OPTIONS") {
@@ -106,6 +107,7 @@ export async function stopServer(graceMs = CONFIG.shutdownGraceMs): Promise<void
   serverInstance = null;
   drainGlobalPool();
   drainGlobalSessions();
+  await CALLER_RUNTIME.drain();
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {

@@ -3,6 +3,7 @@
  */
 
 import { Router, type Request, type Response } from "express";
+import { handleCallerChat, callerMode, handleCallerCancel } from "../caller/http.js";
 import { v4 as uuid } from "uuid";
 import {
   resolveModel,
@@ -73,6 +74,7 @@ export function buildHealthPayload() {
     version: VERSION,
     pool: GLOBAL_CODEX_POOL.stats(),
     sticky_pool: stickyPoolStats(),
+    tool_execution_mode: CONFIG.toolExecutionMode,
   };
 }
 
@@ -145,6 +147,17 @@ export function createRouter(): Router {
   // Chat completions
   const handleChatCompletions = async (req: Request, res: Response) => {
     const body = req.body as ChatCompletionRequest;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      res.status(400).json(invalidRequestError("request body must be a JSON object"));
+      return;
+    }
+    const mode = callerMode(body);
+    if (mode === "invalid") {
+      res.status(400).json(invalidRequestError("tool_execution_mode must be caller or hybrid (and must agree with codex_proxy)", "tool_execution_mode"));
+      return;
+    }
+    if (mode === "caller") { await handleCallerChat(req, res); return; }
+    res.setHeader("X-Codex-Proxy-Tool-Execution-Mode", "hybrid");
     const reqStart = Date.now();
     const requestId = String(res.locals.requestId || uuid());
     trace("route.chat_completions.enter", { requestId, body, headers: req.headers });
@@ -299,10 +312,24 @@ export function createRouter(): Router {
 
   router.post("/chat/completions", handleChatCompletions);
   router.post("/v1/chat/completions", handleChatCompletions);
+  router.post("/v1/caller/cancel", handleCallerCancel);
 
   // Responses API
   const handleResponses = async (req: Request, res: Response) => {
     const body = req.body as ResponseRequest;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      res.status(400).json(invalidRequestError("request body must be a JSON object"));
+      return;
+    }
+    const mode = callerMode(body);
+    if (mode !== "hybrid") {
+      const error = invalidRequestError(mode === "caller"
+        ? "caller execution is supported only for Chat Completions; use /v1/chat/completions"
+        : "tool_execution_mode must be caller or hybrid", "tool_execution_mode");
+      error.error.code = "unsupported_tool_execution_mode";
+      res.status(400).json(error);
+      return;
+    }
     const reqStart = Date.now();
     const requestId = String(res.locals.requestId || uuid());
     trace("route.responses.enter", { requestId, body, headers: req.headers });
