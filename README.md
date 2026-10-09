@@ -21,7 +21,7 @@ This follows the same philosophy as [`claude-proxy`](https://github.com/mehdic/c
 
 ## Status
 
-v0.5.1 local proxy. Working locally with:
+v0.5.2 local proxy. Working locally with:
 
 - non-streaming and streaming `/v1/chat/completions`
 - improved `/v1/responses` compatibility for string input, message arrays, mixed content parts, function-call/function-call-output inputs, reasoning/summary/item-reference inputs, and SDK-friendly streaming event aliases
@@ -383,7 +383,7 @@ This composable design ensures OpenClaw-dispatched tools and Codex-native capabi
 
 The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
 
-Implemented through v0.5.1 plus the sticky-session implementation branch:
+Implemented through v0.5.2 plus the sticky-session implementation branch:
 
 - pooled/oneshot runtimes, opt-in sticky sessions, pricing/usage reporting, release checklist, LaunchAgent support, and local soak harness
 - configurable Codex sandbox/approval policy for trusted localhost deployments

@@ -4,6 +4,7 @@ import express from "express";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import OpenAI from "openai";
+import { compileToolSchemas } from "../adapter/function-tools.js";
 import { ResponseState } from "../responses/state.js";
 import { responsesToChat, normalizeResponsesTools, normalizeInput } from "../responses/validation.js";
 import { handleResponsesRequest, RESPONSE_STATE, emitResponseItem } from "../responses/http.js";
@@ -47,6 +48,21 @@ test("Responses rejects invalid catalogs, schemas, choices and unsupported input
     const invalid = { ...body, ...changes } as ResponseRequest;
     assert.throws(() => responsesToChat(invalid, normalizeInput(invalid.input)));
   }
+});
+
+test("standard n8n URI/date-time schemas compile and still validate actual values", () => {
+  const schema = { type: "object", properties: { url: { type: "string", format: "uri" }, updatedAfter: { type: "string", format: "date-time" } }, required: ["url", "updatedAfter"], additionalProperties: false };
+  const catalog = [{ type: "function" as const, function: { name: "research", parameters: schema } }];
+  const validate = compileToolSchemas(catalog).get("research")!;
+  assert.equal(validate({ url: "https://example.com", updatedAfter: "2026-10-09T12:30:00Z" }), true);
+  assert.equal(validate({ url: "invalid uri", updatedAfter: "2026-10-09T12:30:00Z" }), false);
+  assert.equal(validate({ url: "https://example.com", updatedAfter: "2026-02-30T12:30:00Z" }), false);
+  assert.equal(validate({ url: "https://example.com", updatedAfter: "2026-10-09T12:30:00" }), false);
+  const adapter = new CallerInference(catalog, "unused", () => {}, () => {}, false, true);
+  const call = { ...functionCall(), name: "caller_tool_0", arguments: JSON.stringify({ url: "https://example.com", updatedAfter: "2026-10-09T12:30:00Z" }) };
+  assert.equal(adapter.validateResponse(sse([call])).length, 1);
+  assert.throws(() => adapter.validateResponse(sse([{ ...call, arguments: JSON.stringify({ url: "invalid uri", updatedAfter: "not-a-date" }) }])), /JSON Schema/);
+  assert.throws(() => compileToolSchemas([{ type: "function", function: { name: "x", parameters: { type: "string", format: "made-up-format" } } }]), /unsupported/);
 });
 
 test("Responses enforces JSON schema, tool_choice and nonparallel batches at inference boundary", () => {
