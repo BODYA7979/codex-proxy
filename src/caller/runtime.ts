@@ -112,6 +112,7 @@ class CallerSession {
   async start(body: ChatCompletionRequest): Promise<void> {
     if (this.closed) throw new CodexProxyError("client_closed", "Caller cancelled");
     this.inference.setChoice(body.tool_choice);
+    this.inference.setResponseFormat(body.response_format);
     this.directory = await mkdtemp(join(tmpdir(), "codex-proxy-caller-"));
     if (this.closed) { this.close(); throw new CodexProxyError("client_closed", "Caller cancelled"); }
     // Only the official app-server reads shared credentials. User configuration
@@ -125,8 +126,9 @@ class CallerSession {
     const options: CodexSubprocessOptions = {
       model: this.model, cwd: this.directory, instructions,
       reasoningEffort: body.reasoning_effort || undefined,
-      outputSchema: body.response_format?.type === "json_schema" ? body.response_format.json_schema.schema
-        : body.response_format?.type === "json_object" ? { type: "object" } : undefined,
+      // Codex treats outputSchema as strict Structured Outputs, not JSON mode.
+      // Arbitrary JSON objects use instructions plus final-answer validation.
+      outputSchema: body.response_format?.type === "json_schema" ? body.response_format.json_schema.schema : undefined,
       envOverrides: { CODEX_HOME: this.directory },
       configOverrides: {
         model_provider: '"caller"',
@@ -173,7 +175,11 @@ class CallerSession {
     if (this.failure) throw this.failure;
     const text = this.text.slice(this.sentText);
     this.sentText = this.text.length;
-    if (this.done) return { ...this.done, text };
+    if (this.done) {
+      try { this.inference.validateFinalText(text); }
+      catch (error) { this.fail(error as Error); throw error; }
+      return { ...this.done, text };
+    }
     return { text, turnId: this.modelTurnId, threadId: this.id, usage: null, durationMs: null, finishReason: "stop", toolCalls: [...this.calls.values()].map(call => call.wire) };
   }
 

@@ -80,9 +80,17 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
       const text = JSON.stringify(body.input);
       const outputs = body.input.filter((item: any) => item.type === "function_call_output");
       let output: Record<string, unknown>[];
-      if (text.includes("SCENARIO:transient-failure") && outputs.length && transientFailures++ === 0) { res.writeHead(503).end("temporary fixture failure"); return; }
-      if (text.includes("SCENARIO:upstream-failure") && outputs.length) { res.writeHead(400).end("non-retryable fixture rejection"); return; }
-      if (text.includes("SCENARIO:blocked")) output = [{ ...call(0, "native", { command: `touch ${forbiddenMarker}` }), name: "exec_command" }];
+      if (text.includes("SCENARIO:json-object")) {
+        if (body.text?.format?.type === "json_schema") { res.writeHead(400).end("JSON object mode must not invent a strict output schema"); return; }
+        assert.match(text, /Return ONLY a valid JSON object/);
+        const invalid = text.includes("SCENARIO:json-object-invalid");
+        output = text.includes("SCENARIO:json-object-tools") && !outputs.length
+          ? [message("Collecting facts. "), call(1, "json_read", { path: "facts.txt" })]
+          : [message(invalid ? '[{"fact":"not an object"}]' : '{"facts":[{"text":"fixture fact","tags":[]}],"entities":[]}')];
+      }
+      else if (text.includes("SCENARIO:transient-failure") && outputs.length && transientFailures++ === 0) { res.writeHead(503).end("temporary fixture failure"); return; }
+      else if (text.includes("SCENARIO:upstream-failure") && outputs.length) { res.writeHead(400).end("non-retryable fixture rejection"); return; }
+      else if (text.includes("SCENARIO:blocked")) output = [{ ...call(0, "native", { command: `touch ${forbiddenMarker}` }), name: "exec_command" }];
       else if (text.includes("SCENARIO:cancel-active")) { await sleep(700); output = [message("Cancelled inference")]; }
       else if (body.tool_choice === "none") output = [message('{"ok":true}')];
       else if (!outputs.length) {
@@ -189,6 +197,44 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
       const a = await completion(direct, [{ role: "user", content: "SCENARIO:none" }], "none", true, { tool_choice: "none", response_format: { type: "json_schema", json_schema: { name: "Result", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false }, strict: true } } });
       assert.equal(a.status, 200, JSON.stringify(a.body)); assert.deepEqual(JSON.parse(a.body.choices[0].message.content), { ok: true });
       assert.equal(a.body.choices[0].message.tool_calls, undefined);
+      assert.equal(requests.at(-1)!.text.format.type, "json_schema");
+      assert.deepEqual(requests.at(-1)!.text.format.schema.properties, { ok: { type: "boolean" } });
+    });
+
+    for (const target of targets) for (const streaming of [false, true]) {
+      await t.test(`${target.name}: Hindsight JSON object without a fabricated schema (${streaming ? "SSE" : "JSON"})`, async () => {
+        const result = await completion(target.url, [
+          { role: "system", content: "Extract significant facts and return JSON." },
+          { role: "user", content: "SCENARIO:json-object Return valid JSON only." },
+        ], "hindsight", streaming, { ...target.extra, tools: [], response_format: { type: "json_object" }, max_completion_tokens: 64000, reasoning_effort: "low" });
+        assert.equal(result.status, 200, JSON.stringify(result.body));
+        assert.deepEqual(JSON.parse(result.body.choices[0].message.content), { facts: [{ text: "fixture fact", tags: [] }], entities: [] });
+        assert.equal(result.body.choices[0].message.tool_calls, undefined);
+        assert.notEqual(requests.at(-1)!.text?.format?.type, "json_schema");
+      });
+    }
+
+    for (const streaming of [false, true]) await t.test(`JSON object rejects a non-object final answer (${streaming ? "SSE" : "JSON"})`, async () => {
+      const result = await completion(direct, [{ role: "user", content: "SCENARIO:json-object-invalid Return JSON." }], "invalid-json", streaming,
+        { tools: [], response_format: { type: "json_object" } });
+      assert.equal(result.status, 502, JSON.stringify(result.body));
+      assert.equal(result.body.error.code, "caller_invalid_json_object");
+      assert.doesNotMatch(JSON.stringify(result.body), /not an object/);
+    });
+
+    for (const streaming of [false, true]) await t.test(`JSON object survives a tool continuation (${streaming ? "SSE" : "JSON"})`, async () => {
+      const messages: ChatMessage[] = [{ role: "user", content: "SCENARIO:json-object-tools Extract JSON facts from the client file." }];
+      const first = await completion(direct, messages, "json-tools", streaming, { response_format: { type: "json_object" } });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      const assistant = first.body.choices[0].message;
+      assert.equal(assistant.content, "Collecting facts. ");
+      assert.equal(assistant.tool_calls[0].function.name, "read");
+      messages.push(assistant, { role: "tool", tool_call_id: assistant.tool_calls[0].id, content: "fixture fact" });
+      // SDK continuations may omit response_format; the initial format persists.
+      const final = await completion(direct, messages, "json-tools", streaming);
+      assert.equal(final.status, 200, JSON.stringify(final.body));
+      assert.deepEqual(JSON.parse(final.body.choices[0].message.content), { facts: [{ text: "fixture fact", tags: [] }], entities: [] });
+      assert.equal(final.body.choices[0].message.tool_calls, undefined);
     });
 
     await t.test("two independent clients, explicit cancel, TTL, duplicate/foreign results", async () => {

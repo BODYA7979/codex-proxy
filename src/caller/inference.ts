@@ -18,6 +18,7 @@ export class CallerInference {
   private server?: Server;
   private readonly controllers = new Set<AbortController>();
   private choice: ChatCompletionRequest["tool_choice"];
+  private jsonObject = false;
   lastFailure?: CallerInferenceError;
   constructor(
     readonly tools: ChatCompletionTool[],
@@ -27,6 +28,17 @@ export class CallerInference {
   ) {}
 
   setChoice(choice: ChatCompletionRequest["tool_choice"]): void { this.choice = choice; }
+
+  setResponseFormat(format: ChatCompletionRequest["response_format"]): void { this.jsonObject = format?.type === "json_object"; }
+
+  validateFinalText(text: string): void {
+    if (!this.jsonObject) return;
+    let value: unknown;
+    try { value = JSON.parse(text); } catch { /* Report a static error without model output. */ }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new CallerInferenceError("caller_invalid_json_object", "Caller final answer must be a valid JSON object");
+    }
+  }
 
   rewriteRequest(body: Record<string, unknown>): Record<string, unknown> {
     const tools = this.tools.map((tool, i) => ({
@@ -45,7 +57,10 @@ export class CallerInference {
       return type !== "additional_tools" && type !== "tool_search_output";
     }) : body.input;
     const scopedInput = Array.isArray(input) ? [...input] : [];
-    const boundary = { type: "message", role: "developer", content: [{ type: "input_text", text: CALLER_PERMISSION_INSTRUCTIONS }] };
+    const jsonInstruction = !compaction && this.jsonObject
+      ? "\nFor your final answer, Return ONLY a valid JSON object. Do not include markdown, prose, code fences, or any text outside the JSON object. Tool calls may precede the final answer."
+      : "";
+    const boundary = { type: "message", role: "developer", content: [{ type: "input_text", text: CALLER_PERMISSION_INSTRUCTIONS + jsonInstruction }] };
     // CompactionTrigger must remain last; app-server removes it from history
     // after receiving the opaque compaction item.
     scopedInput.splice(compaction ? scopedInput.length - 1 : scopedInput.length, 0, boundary);

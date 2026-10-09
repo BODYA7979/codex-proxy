@@ -56,6 +56,25 @@ test("inference boundary removes all native tools and honors all tool_choice val
   assert.throws(() => adapter.validateResponse("data: {}\n\n"), /Incomplete/);
 });
 
+test("JSON object mode preserves arbitrary fields and rejects invalid final answers", () => {
+  const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
+  adapter.setResponseFormat({ type: "json_object" });
+  const input = adapter.rewriteRequest({ input: [{ type: "message", role: "user", content: "Extract facts" }] }).input as any[];
+  assert.match(input.at(-1).content[0].text, /Return ONLY a valid JSON object/);
+  assert.match(input.at(-1).content[0].text, /Tool calls may precede the final answer/);
+  assert.doesNotThrow(() => adapter.validateFinalText(' {"facts":[{"text":"fact","tags":[]}],"entities":[]} '));
+  assert.doesNotThrow(() => adapter.validateFinalText('{}'));
+  // Tool segments remain executable; only the completed final answer is JSON.
+  assert.equal(adapter.validateResponse(stream([call()]))[0].name, "read");
+  for (const invalid of ['[{"fact":"array"}]', 'null', 'true', '42', '"text"', '', '```json\n{}\n```', '{broken', '{} {}']) {
+    assert.throws(() => adapter.validateFinalText(invalid), { code: "caller_invalid_json_object", message: "Caller final answer must be a valid JSON object" });
+  }
+  adapter.setResponseFormat({ type: "json_schema", json_schema: { schema: { type: "object" } } });
+  assert.doesNotThrow(() => adapter.validateFinalText("Unrestricted by JSON object validation"));
+  adapter.setResponseFormat(undefined);
+  assert.doesNotThrow(() => adapter.validateFinalText("Ordinary text"));
+});
+
 test("HTTP inference guard forwards auth without forwarding native tools or leaking forbidden SSE", async () => {
   let received: Record<string, unknown> = {};
   const upstream = createServer(async (req, res) => {
@@ -145,9 +164,11 @@ test("caller permissions stay scoped to the proxy while client operations depend
 test("compaction is accepted only for app-server's dedicated trigger and cannot execute tools", () => {
   const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
   adapter.setChoice("required");
+  adapter.setResponseFormat({ type: "json_object" });
   const converted = adapter.rewriteRequest({ input: [{ type: "message", role: "user", content: "History" }, { type: "compaction_trigger" }] });
   assert.equal(converted.tool_choice, "auto");
   assert.equal((converted.input as any[]).at(-1).type, "compaction_trigger");
+  assert.doesNotMatch(JSON.stringify(converted.input), /Return ONLY a valid JSON object/);
   const compact = stream([{ type: "compaction", id: "cmp_1", encrypted_content: "opaque-fixture" }]);
   assert.deepEqual(adapter.validateResponse(compact, true), []);
   assert.throws(() => adapter.validateResponse(compact), /forbidden/);
