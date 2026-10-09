@@ -73,6 +73,18 @@ test("inference boundary removes all native tools and honors all tool_choice val
   assert.throws(() => adapter.validateResponse("data: {}\n\n"), /Incomplete/);
 });
 
+test("parallel preference preserves backend capabilities including Responses Lite", () => {
+  const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
+  assert.equal(Object.hasOwn(adapter.rewriteRequest({ input: [] }), "parallel_tool_calls"), false);
+  assert.equal(adapter.rewriteRequest({ input: [], parallel_tool_calls: false }).parallel_tool_calls, false);
+  adapter.setParallel(true);
+  assert.equal(adapter.rewriteRequest({ input: [], parallel_tool_calls: false }).parallel_tool_calls, false);
+  assert.throws(() => adapter.validateResponse(stream([call(), call("caller_tool_0", "second", '{"command":"ls"}')])), /parallel/);
+  assert.equal(adapter.rewriteRequest({ input: [], parallel_tool_calls: true }).parallel_tool_calls, true);
+  adapter.setParallel(false);
+  assert.equal(adapter.rewriteRequest({ input: [], parallel_tool_calls: true }).parallel_tool_calls, false);
+});
+
 test("JSON object mode preserves arbitrary fields and rejects invalid final answers", () => {
   const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
   adapter.setResponseFormat({ type: "json_object" });
@@ -196,4 +208,20 @@ test("compaction is accepted only for app-server's dedicated trigger and cannot 
   assert.throws(() => adapter.validateResponse(compact), /forbidden/);
   assert.throws(() => adapter.validateResponse(stream([call()]), true), /non-compaction/);
   assert.throws(() => adapter.validateResponse(stream([{ type: "compaction", encrypted_content: "" }]), true), /encrypted/);
+});
+
+test("upstream errors expose only safe API code/parameter without response content", async () => {
+  const upstream = createServer((_req, res) => res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "unsupported_value", param: "parallel_tool_calls", message: "private-prompt secret-credential" } })));
+  upstream.listen(0, "127.0.0.1"); await once(upstream, "listening");
+  let failure: any;
+  const adapter = new CallerInference([], `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, () => {}, error => { failure = error; });
+  try {
+    const url = await adapter.start();
+    const response = await fetch(`${url}/responses`, { method: "POST", body: JSON.stringify({ input: [] }) });
+    assert.equal(response.status, 502);
+    const raw = await response.text();
+    assert.match(raw, /parallel_tool_calls/);
+    assert.doesNotMatch(raw, /private-prompt|secret-credential/);
+    assert.deepEqual(failure.upstreamError, { code: "unsupported_value", param: "parallel_tool_calls" });
+  } finally { adapter.close(); upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve())); }
 });

@@ -8,7 +8,7 @@ import type { ChatCompletionRequest, ChatCompletionTool } from "../types/openai.
 export interface ModelToolCall { callId: string; name: string; arguments: string }
 
 export class CallerInferenceError extends CodexProxyError {
-  constructor(readonly code: string, message: string, readonly upstreamStatus?: number) {
+  constructor(readonly code: string, message: string, readonly upstreamStatus?: number, readonly upstreamError?: { code?: string; param?: string }) {
     super("protocol", message);
   }
 }
@@ -21,7 +21,8 @@ export class CallerInference {
   private readonly controllers = new Set<AbortController>();
   private choice: ChatCompletionRequest["tool_choice"];
   private jsonObject = false;
-  private parallel = true;
+  private parallel?: boolean;
+  private backendAllowsParallel = true;
   private clientInstructions = "";
   private finalValidator?: ValidateFunction;
   private validators?: Map<string, ValidateFunction>;
@@ -38,7 +39,7 @@ export class CallerInference {
 
   setChoice(choice: ChatCompletionRequest["tool_choice"]): void { this.choice = choice; }
 
-  setParallel(value: boolean | undefined): void { this.parallel = value !== false; }
+  setParallel(value: boolean | undefined): void { this.parallel = value; }
   setClientInstructions(value: string): void { this.clientInstructions = value; }
 
   setResponseFormat(format: ChatCompletionRequest["response_format"]): void {
@@ -84,7 +85,13 @@ export class CallerInference {
     // after receiving the opaque compaction item.
     scopedInput.splice(compaction ? scopedInput.length - 1 : scopedInput.length, 0, boundary);
     if (this.clientInstructions && !compaction) scopedInput.push({ type: "message", role: "developer", content: [{ type: "input_text", text: this.clientInstructions }] });
-    return { ...body, input: scopedInput, tools: choice === "none" ? native : tools, tool_choice: choice === "none" && this.nativeTools ? "auto" : toolChoice, parallel_tool_calls: this.parallel };
+    // App-server knows model/transport capabilities (e.g. Responses Lite).
+    // Client preference may restrict parallelism, but cannot enable a backend
+    // capability the harness explicitly disabled. Omitted preference preserves
+    // the original request instead of injecting an unsupported true value.
+    this.backendAllowsParallel = body.parallel_tool_calls !== false;
+    const parallel = this.parallel === false || !this.backendAllowsParallel ? false : this.parallel;
+    return { ...body, ...(parallel === undefined ? {} : { parallel_tool_calls: parallel }), input: scopedInput, tools: choice === "none" ? native : tools, tool_choice: choice === "none" && this.nativeTools ? "auto" : toolChoice };
   }
 
   validateResponse(sse: string, compaction = false): ModelToolCall[] {
@@ -153,7 +160,7 @@ export class CallerInference {
     if (!compaction && (this.choice === "required" || typeof this.choice === "object") && calls.size === 0) {
       throw new CallerInferenceError("caller_tool_choice_violation", "Caller inference did not satisfy tool_choice");
     }
-    if (!compaction && !this.parallel && calls.size > 1) throw new CallerInferenceError("caller_parallel_tool_calls_violation", "Backend returned multiple calls with parallel_tool_calls false");
+    if (!compaction && (this.parallel === false || !this.backendAllowsParallel) && calls.size > 1) throw new CallerInferenceError("caller_parallel_tool_calls_violation", "Backend returned multiple calls with parallel_tool_calls false");
     this.output = [...output.values()];
     return [...calls.values()];
   }
@@ -183,7 +190,11 @@ export class CallerInference {
           if (!excluded.has(key) && typeof value === "string") headers.set(key, value);
         }
         const upstream = await fetch(this.upstream, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal, redirect: "error" });
-        if (!upstream.ok) throw new CallerInferenceError("caller_upstream_http_error", `Caller inference upstream returned HTTP ${upstream.status}`, upstream.status);
+        if (!upstream.ok) {
+          const details = await safeUpstreamError(upstream);
+          const suffix = details.param ? ` (parameter: ${details.param})` : "";
+          throw new CallerInferenceError("caller_upstream_http_error", `Caller inference upstream returned HTTP ${upstream.status}${suffix}`, upstream.status, details);
+        }
         if (!upstream.body) throw new CallerInferenceError("caller_empty_upstream_response", "Caller upstream has no body");
         const parts: Uint8Array[] = [];
         let bytes = 0;
@@ -205,7 +216,7 @@ export class CallerInference {
         const retryable = error.code === "caller_upstream_transport_error"
           || error.code === "caller_incomplete_upstream_stream"
           || (error.code === "caller_upstream_http_error" && [408, 425, 429, 500, 502, 503, 504].includes(error.upstreamStatus || 0));
-        console.error(JSON.stringify({ event: "caller.inference_failed", mode: "caller", code: error.code, upstreamStatus: error.upstreamStatus, retryable }));
+        console.error(JSON.stringify({ event: "caller.inference_failed", mode: "caller", code: error.code, upstreamStatus: error.upstreamStatus, upstreamErrorCode: error.upstreamError?.code, upstreamErrorParam: error.upstreamError?.param, retryable }));
         // The harness owns inference retries. Keep its pending RPC/turn alive
         // for transient upstream failures; never replay a client operation.
         if (!retryable) this.onFailure(error);
@@ -232,4 +243,30 @@ export class CallerInference {
     this.server?.closeAllConnections();
     this.server?.close();
   }
+}
+
+/** Only allowlisted API error codes/field names reach diagnostics. Error bodies
+ * and messages may echo prompts, credentials or arguments and remain private. */
+async function safeUpstreamError(response: Response): Promise<{ code?: string; param?: string }> {
+  if (!response.body) return {};
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.length;
+      if (bytes > 8192) return {};
+      chunks.push(next.value);
+    }
+    const error = JSON.parse(Buffer.concat(chunks).toString("utf8"))?.error;
+    const codes = new Set(["unsupported_value", "unsupported_parameter", "invalid_value", "invalid_request_error", "invalid_json_schema", "model_not_found", "insufficient_quota", "rate_limit_exceeded"]);
+    const params = new Set(["model", "parallel_tool_calls", "tool_choice", "tools", "input", "instructions", "text.format", "text.format.schema", "reasoning.effort", "max_output_tokens", "temperature", "top_p"]);
+    return {
+      ...(codes.has(error?.code) ? { code: error.code } : {}),
+      ...(params.has(error?.param) ? { param: error.param } : {}),
+    };
+  } catch { return {}; }
+  finally { await reader.cancel().catch(() => {}); }
 }

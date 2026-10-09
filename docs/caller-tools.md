@@ -133,7 +133,7 @@ Cancelling any call closes its whole pending batch/session. Use the proxy's dire
 
 ## Diagnostics, tests and limits
 
-`/health` reports the configured mode; responses carry `X-Codex-Proxy-Tool-Execution-Mode`. With `CODEX_PROXY_DEBUG=1` or `CODEX_PROXY_TRACE=1`, caller events contain request ID, mode, received tool count, returned call count, or failure kind. Inference failures also produce a safe `caller.inference_failed` event with a static error code, optional numeric upstream status and retryability. Responses preserve that code; raw upstream error bodies are omitted. Raw caller JSON-RPC, prompts, arguments, tool results and subprocess stderr are suppressed. Gateway logging settings are separate; the example disables gateway content logs.
+`/health` reports the configured mode; responses carry `X-Codex-Proxy-Tool-Execution-Mode`. With `CODEX_PROXY_DEBUG=1` or `CODEX_PROXY_TRACE=1`, caller events contain request ID, mode, received tool count, returned call count, or failure kind. Inference failures also produce a safe `caller.inference_failed` event with a static error code, optional numeric upstream status, retryability, and allowlisted `upstreamErrorCode`/`upstreamErrorParam`. Upstream error messages and bodies remain suppressed. Responses preserve that code; raw upstream error bodies are omitted. Raw caller JSON-RPC, prompts, arguments, tool results and subprocess stderr are suppressed. Gateway logging settings are separate; the example disables gateway content logs.
 
 Run regression tests with `npm test`. Run the real installed app-server against a deterministic local inference server with `npm run test:caller`. No paid model calls are made by this fixture.
 
