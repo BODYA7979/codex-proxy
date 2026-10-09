@@ -56,29 +56,13 @@ Caller sessions are separate from hybrid/sticky workers, isolated by client iden
 
 ## Responses
 
-`/v1/responses` accepts text input or a minimal input item array. It maps the final Codex turn to:
+`/v1/responses` and `/responses` accept native function definitions and emit `function_call` output items. `call_id` correlates client `function_call_output` items with the same dynamic RPCs used by caller Chat Completions. Relative message/call order is retained. External functions execute on the client; hybrid mode retains configured Codex-native tools.
 
-```json
-{
-  "object": "response",
-  "status": "completed",
-  "output": [{ "type": "message", "content": [{ "type": "output_text", "text": "..." }] }]
-}
-```
+`previous_response_id` resolves owner-isolated in-memory input/output history with TTL, entry and byte limits. Pending batches require exactly one result per call and cannot be consumed twice. Full explicit call/output histories can be replayed without a response reference. `store:false` disables the response-reference cache; restart and expiry invalidate cached references.
 
-Streaming emits minimal Responses-style event names:
+Streaming emits the standard created/in-progress, message content, function-argument, item-done, completed/failed events, each with a monotonic `sequence_number`. Tool-enabled turns are buffered for validation before publishing text or calls. Codex summary events may omit output items already emitted as `response.output_item.done`; the adapter preserves those completed items. Text-only hybrid turns retain live text deltas.
 
-- `response.created`
-- `response.in_progress`
-- `response.output_item.added`
-- `response.content_part.added`
-- `response.output_text.delta`
-- `response.output_text.done`
-- `response.content_part.done`
-- `response.output_item.done`
-- `response.completed`
-
-`response.completed` reuses the same response id emitted by `response.created`. Text-only streams include both `text` and a compatibility `delta` alias on `response.output_text.done`.
+See [Responses function calling](docs/responses-function-calling.md) for exact shapes, curl/SDK examples, isolation, limits and verified coverage.
 
 ## Usage and cache signals
 

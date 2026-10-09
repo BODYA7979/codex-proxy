@@ -63,6 +63,8 @@ export interface CodexSubprocessOptions {
   configOverrides?: Record<string, string>;
   /** Dedicated caller workers only; never enter the hybrid worker pool. */
   caller?: {
+    /** Hybrid Responses may retain registered native tools and configured policy. */
+    nativeTools?: boolean;
     dynamicTools: Array<{ type: "function"; name: string; description: string; inputSchema: unknown }>;
     onToolCall: (request: { id: RequestId; params: Record<string, unknown> }) => void;
   };
@@ -230,8 +232,8 @@ export class CodexSubprocess {
     const threadResp = await this.sendRequest<ThreadStartResponse>("thread/start", {
       model: options.model,
       cwd: options.cwd || process.cwd(),
-      approvalPolicy: options.caller ? "never" : CONFIG.codexApprovalPolicy,
-      sandbox: options.caller ? "read-only" : CONFIG.codexSandbox,
+      approvalPolicy: options.caller && !options.caller.nativeTools ? "never" : CONFIG.codexApprovalPolicy,
+      sandbox: options.caller && !options.caller.nativeTools ? "read-only" : CONFIG.codexSandbox,
       ephemeral,
       baseInstructions: options.instructions || null,
       experimentalRawEvents: false,

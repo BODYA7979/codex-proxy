@@ -1,6 +1,6 @@
 {
   "name": "codex-proxy",
-  "version": "0.4.11",
+  "version": "0.5.0",
   "description": "OpenAI-compatible local HTTP API proxy for Codex app-server over stdio JSON-RPC",
   "type": "module",
   "main": "dist/server/standalone.js",
@@ -11,7 +11,9 @@
     "smoke": "scripts/smoke.sh",
     "test": "node --test dist/__tests__/*.test.js",
     "pretest": "npm run build",
-    "test:caller": "npm run build && CODEX_PROXY_CALLER_INTEGRATION=1 node --test dist/__tests__/caller.integration.test.js"
+    "test:caller": "npm run build && CODEX_PROXY_CALLER_INTEGRATION=1 node --test dist/__tests__/caller.integration.test.js",
+    "test:responses": "npm run build && CODEX_PROXY_RESPONSES_INTEGRATION=1 node --test dist/__tests__/responses.integration.test.js",
+    "test:integration": "npm run build && CODEX_PROXY_CALLER_INTEGRATION=1 CODEX_PROXY_RESPONSES_INTEGRATION=1 node --test dist/__tests__/caller.integration.test.js dist/__tests__/responses.integration.test.js"
   },
   "keywords": [
     "codex",
@@ -27,6 +29,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "express": "^4.21.2",
     "uuid": "^11.0.5"
   },
@@ -37,6 +40,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.7",
     "@types/uuid": "^10.0.0",
+    "openai": "^7.31.0",
     "typescript": "^5.7.3"
   }
 }

@@ -2,6 +2,7 @@
  * Express route handlers for the codex-proxy.
  */
 
+import { handleResponsesRequest } from "../responses/http.js";
 import { Router, type Request, type Response } from "express";
 import { handleCallerChat, callerMode, handleCallerCancel } from "../caller/http.js";
 import { v4 as uuid } from "uuid";
@@ -26,11 +27,6 @@ import {
   turnResultUsageToOpenAI,
   chunkToSSE,
   SSE_DONE,
-  turnResultToResponseObject,
-  makeResponseDoneEvent,
-  makeResponseStreamEvent,
-  makeResponseTextDeltaEvent,
-  makeResponseTextDoneEvent,
 } from "../adapter/codex-to-openai.js";
 import { CodexSubprocess, type CodexSubprocessOptions, type DeltaCallback, type NotificationCallback, type TurnResult } from "../subprocess/manager.js";
 import { GLOBAL_CODEX_POOL, type PoolLease } from "../subprocess/pool.js";
@@ -321,218 +317,20 @@ export function createRouter(): Router {
       res.status(400).json(invalidRequestError("request body must be a JSON object"));
       return;
     }
-    const mode = callerMode(body);
-    if (mode !== "hybrid") {
-      const error = invalidRequestError(mode === "caller"
-        ? "caller execution is supported only for Chat Completions; use /v1/chat/completions"
-        : "tool_execution_mode must be caller or hybrid", "tool_execution_mode");
-      error.error.code = "unsupported_tool_execution_mode";
-      res.status(400).json(error);
-      return;
-    }
-    const reqStart = Date.now();
-    const requestId = String(res.locals.requestId || uuid());
-    trace("route.responses.enter", { requestId, body, headers: req.headers });
-    let status: "ok" | "error" = "error";
-    const runtime = resolveRuntime(req, CONFIG);
-    trace("route.responses.runtime", { requestId, runtime, configuredRuntime: CONFIG.runtime, allowRuntimeOverride: CONFIG.allowRuntimeOverride });
-    const abortController = new AbortController();
-    if (!body.input) {
-      res.status(400).json(invalidRequestError("input is required", "input"));
-      return;
-    }
-
-    const model = resolveModel(body.model);
-    const label = canonicalModelLabel(model);
-    trace("route.responses.model", { requestId, requestedModel: body.model, resolvedModel: model, label });
-
-    const { prompt, imageUrls, options } = responsesRequestToOptions(body, {
-      timeoutMs: CONFIG.defaultTimeoutMs,
-      initTimeoutMs: CONFIG.initTimeoutMs,
-      turnStartTimeoutMs: CONFIG.turnStartTimeoutMs,
+    await handleResponsesRequest(req, res, async (effective, signal, delta) => {
+      const runtime = resolveRuntime(req, CONFIG);
+      const session = resolveSessionOptions(req, CONFIG);
+      if (session.kind === "invalid") throw new CodexProxyError("protocol", session.message);
+      recordStickySessionMode(session.options.mode, "accepted");
+      setSessionHeaders(res, session.options);
+      const { prompt, imageUrls, options } = responsesRequestToOptions(effective, {
+        timeoutMs: CONFIG.defaultTimeoutMs, initTimeoutMs: CONFIG.initTimeoutMs, turnStartTimeoutMs: CONFIG.turnStartTimeoutMs,
+      });
+      const result = await runTurn(prompt, options, runtime, "responses", delta, !effective.stream, signal, session.options, undefined, imageUrls);
+      if (!effective.stream) setUsageHeaders(res, result);
+      if (result.durationMs) observeHistogram("codex_proxy_turn_duration_ms", result.durationMs, { model: canonicalModelLabel(options.model || CONFIG.defaultModel) });
+      return result;
     });
-    trace("route.responses.options", { requestId, prompt, imageUrls, options, stream: body.stream });
-    const session = resolveSessionOptions(req, CONFIG);
-    trace("route.responses.session", { requestId, session });
-    if (session.kind === "invalid") {
-      recordStickySessionMode(session.options.mode, "rejected");
-      incCounter("codex_proxy_errors_total", { endpoint: "responses", model: label });
-      res.status(400).json(invalidRequestError(session.message, "X-Codex-Proxy-Session-Key"));
-      return;
-    }
-    recordStickySessionMode(session.options.mode, "accepted");
-    setSessionHeaders(res, session.options);
-    res.on("close", () => {
-      trace("route.responses.close", { requestId, status, writableEnded: res.writableEnded, durationMs: Date.now() - reqStart });
-      recordRequest({ endpoint: "responses", model, runtime, status, durationMs: Date.now() - reqStart });
-      if (!res.writableEnded) abortController.abort();
-    });
-
-    try {
-      if (body.stream) {
-        trace("route.responses.stream.start", { requestId, model, runtime, session: session.options });
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
-        res.setHeader("X-Request-Id", requestId);
-        res.flushHeaders();
-        let lastStreamWrite = Date.now();
-        const safeWrite = guardedWrite(
-          (chunk) => res.write(chunk),
-          () => !res.writableEnded && res.writable,
-        );
-        safeWrite(":ok\n\n");
-        const phaseTracker = attachPhaseTracker();
-
-        const respId = `resp_${requestId}`;
-        const outputId = `msg_${uuid()}`;
-
-        // response.created
-        const partialResponse = {
-          id: respId, object: "response", created_at: Math.floor(Date.now() / 1000),
-          status: "in_progress", model, output: [],
-          instructions: body.instructions ?? null,
-          metadata: body.metadata ?? null,
-          previous_response_id: body.previous_response_id ?? null,
-          temperature: body.temperature ?? null,
-          top_p: body.top_p ?? null,
-        };
-        safeWrite(makeResponseStreamEvent("response.created", { response: partialResponse }));
-        lastStreamWrite = Date.now();
-
-        safeWrite(makeResponseStreamEvent("response.in_progress", { response: partialResponse }));
-        lastStreamWrite = Date.now();
-
-        // output_item.added
-        safeWrite(makeResponseStreamEvent("response.output_item.added", {
-          output_index: 0,
-          item: { type: "message", id: outputId, role: "assistant", status: "in_progress", content: [] },
-        }));
-        lastStreamWrite = Date.now();
-
-        safeWrite(makeResponseStreamEvent("response.content_part.added", {
-          output_index: 0,
-          content_index: 0,
-          item_id: outputId,
-          part: { type: "output_text", text: "" },
-        }));
-        lastStreamWrite = Date.now();
-
-        const keepalive = startSseKeepalive(CONFIG.keepaliveMs, safeWrite, () => lastStreamWrite, (next) => {
-          lastStreamWrite = next;
-        }, (count) => {
-          const phase = phaseTracker.poll();
-          if (phase && hasRenderableAssistantContent(phase.text)) {
-            return makeResponseTextDeltaEvent(0, 0, `${phase.text}\n`, { responseId: respId, itemId: outputId });
-          }
-          return createSseKeepaliveComment(requestId, count);
-        });
-
-        const observeNotification: NotificationCallback = (method, params) => phaseTracker.observe(method, params);
-        let result: TurnResult;
-        try {
-          result = await runTurn(prompt, options, runtime, "responses", (delta) => {
-            safeWrite(makeResponseTextDeltaEvent(0, 0, delta, { responseId: respId, itemId: outputId }));
-            lastStreamWrite = Date.now();
-          }, false, abortController.signal, session.options, observeNotification, imageUrls);
-        } finally {
-          if (keepalive) clearInterval(keepalive);
-          phaseTracker.detach();
-        }
-        status = "ok";
-        trace("route.responses.stream.result", { requestId, result });
-        annotateTurnUsage(result, prompt, model);
-
-        // output_text.done
-        safeWrite(makeResponseTextDoneEvent(0, 0, result.text, { responseId: respId, itemId: outputId }));
-        lastStreamWrite = Date.now();
-
-        safeWrite(makeResponseStreamEvent("response.content_part.done", {
-          output_index: 0,
-          content_index: 0,
-          item_id: outputId,
-          part: { type: "output_text", text: result.text },
-        }));
-        lastStreamWrite = Date.now();
-
-        // output_item.done
-        safeWrite(makeResponseStreamEvent("response.output_item.done", {
-          output_index: 0,
-          item: {
-            type: "message", id: outputId, role: "assistant", status: "completed",
-            content: [{ type: "output_text", text: result.text }],
-          },
-        }));
-        lastStreamWrite = Date.now();
-
-        // response.completed plus response.done alias for newer clients.
-        const finalResponse = turnResultToResponseObject(result, model, {
-          responseId: respId,
-          outputId,
-          instructions: body.instructions ?? null,
-          metadata: body.metadata,
-          previousResponseId: body.previous_response_id,
-          temperature: body.temperature ?? null,
-          topP: body.top_p ?? null,
-        });
-        safeWrite(makeResponseStreamEvent("response.completed", {
-          response: finalResponse,
-        }));
-        lastStreamWrite = Date.now();
-
-        safeWrite(makeResponseDoneEvent(finalResponse));
-        lastStreamWrite = Date.now();
-
-        res.end();
-
-        if (result.durationMs) {
-          observeHistogram("codex_proxy_turn_duration_ms", result.durationMs, { model: label });
-        }
-      } else {
-        const result = await runTurn(
-          prompt,
-          options,
-          runtime,
-          "responses",
-          undefined,
-          true,
-          abortController.signal,
-          session.options,
-          undefined,
-          imageUrls,
-        );
-        trace("route.responses.result", { requestId, result });
-        annotateTurnUsage(result, prompt, model);
-        const response = turnResultToResponseObject(result, model, {
-          instructions: body.instructions ?? null,
-          metadata: body.metadata,
-          previousResponseId: body.previous_response_id,
-          temperature: body.temperature ?? null,
-          topP: body.top_p ?? null,
-        });
-        status = "ok";
-        trace("route.responses.response", { requestId, response });
-        setUsageHeaders(res, result);
-        res.json(response);
-
-        if (result.durationMs) {
-          observeHistogram("codex_proxy_turn_duration_ms", result.durationMs, { model: label });
-        }
-      }
-    } catch (err) {
-      traceError("route.responses.error", err, { requestId, model, runtime, status });
-      incCounter("codex_proxy_errors_total", { endpoint: "responses", model: label });
-      if (err instanceof CodexProxyError && err.kind === "client_closed") return;
-      const mapped = mapErrorToHttp(err, CONFIG.debug);
-      trace("route.responses.error_mapped", { requestId, mapped, headersSent: res.headersSent, writableEnded: res.writableEnded });
-      if (!res.headersSent) {
-        res.status(mapped.status).json(mapped.body);
-      } else if (!res.writableEnded && res.writable) {
-        res.write(makeResponseStreamEvent("error", mapped.body as unknown as Record<string, unknown>));
-        res.end();
-      }
-    }
   };
 
   router.post("/responses", handleResponses);

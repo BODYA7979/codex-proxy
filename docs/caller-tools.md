@@ -8,7 +8,7 @@ CODEX_PROXY_TOOL_EXECUTION_MODE=caller CODEX_PROXY_DEFAULT_MODEL=gpt-6.1-sol npm
 
 `hybrid` remains the default. A direct Chat Completions request can instead select `"tool_execution_mode":"caller"` at the top level or inside `codex_proxy`. Conflicting/unknown values are rejected. Bifrost can remove proxy-specific fields, so use the environment setting behind a gateway.
 
-Caller mode applies to `/v1/chat/completions` and `/chat/completions`. `/v1/responses` rejects caller mode with HTTP 400 instead of silently allowing native operations. Its existing implementation remains available in hybrid mode; caller execution for that endpoint is a later phase. Caller mode uses dedicated processes, regardless of the hybrid runtime setting, and does not reuse sticky-session workers.
+Caller mode applies to `/v1/chat/completions`, `/chat/completions`, `/v1/responses` and `/responses`. Responses exposes native function calls/results, bounded response references and typed SSE; see [Responses function calling](responses-function-calling.md). Caller mode uses dedicated processes, regardless of the hybrid runtime setting, and does not reuse sticky-session workers.
 
 ## Runtime requirement
 
@@ -111,7 +111,7 @@ Correlation is isolated by a hash of the forwarded Authorization header, optiona
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_PROXY_TOOL_EXECUTION_MODE` | `hybrid` | Default Chat Completions tool mode |
+| `CODEX_PROXY_TOOL_EXECUTION_MODE` | `hybrid` | Default API tool execution mode |
 | `CODEX_PROXY_CALLER_TTL_MS` | `600000` | Idle lifetime while waiting for client tool results |
 | `CODEX_PROXY_CALLER_MAX_SESSIONS` | `32` | Maximum dedicated caller workers, including active requests |
 | `CODEX_PROXY_TIMEOUT_MS` | `120000` | Active model/RPC turn timeout; paused while waiting for caller results |
@@ -153,3 +153,7 @@ Current limits: function tools with JSON object arguments only; complete result 
 Assistant messages with nonempty, valid function `tool_calls` may omit `content`, as permitted by Chat Completions. This includes Bifrost continuations that omit `content: null` during serialization. Other roles and assistant messages without valid tool calls still require content. Continuation ownership, tool-call IDs and complete result batches are checked independently.
 
 The reported historical `/app` sandbox attempt is not confirmed by available local proxy logs. Absence of an OpenCode tool event alone does not identify the executing process; correlate original proxy/app-server logs by time/request ID before attributing that incident.
+
+## Responses API
+
+The same caller runtime now serves Responses native function calls and outputs. See [Responses function calling](responses-function-calling.md) for bounded response references, replay, streaming, SDK examples and current verification limits. Responses hybrid mode retains native tool definitions; caller mode retains the execution boundary described above.

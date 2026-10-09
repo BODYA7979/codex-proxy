@@ -142,8 +142,14 @@ export function responsesRequestToOptions(
     imageUrls = extractResponsesImageUrls(req.input);
   }
 
+  const toolOptions = {
+    tools: req.tools?.map(tool => "function" in tool ? tool : { type: "function" as const, function: { ...tool, strict: tool.strict ?? undefined } }),
+    tool_choice: typeof req.tool_choice === "object" && "name" in req.tool_choice
+      ? { type: "function" as const, function: { name: req.tool_choice.name } } : req.tool_choice,
+    response_format: req.response_format,
+  };
   return {
-    prompt: appendToolInstructions(appendStructuredOutputInstruction(prompt, req), req),
+    prompt: appendToolInstructions(appendStructuredOutputInstruction(prompt, toolOptions), toolOptions),
     imageUrls,
     options: {
       model,

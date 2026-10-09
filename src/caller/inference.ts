@@ -1,5 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { CodexProxyError } from "../server/errors.js";
+import { compileToolSchemas } from "../adapter/function-tools.js";
+import type { ValidateFunction } from "ajv";
 import { CALLER_PERMISSION_INSTRUCTIONS, isCompactionRequest } from "./policy.js";
 import type { ChatCompletionRequest, ChatCompletionTool } from "../types/openai.js";
 
@@ -19,33 +21,50 @@ export class CallerInference {
   private readonly controllers = new Set<AbortController>();
   private choice: ChatCompletionRequest["tool_choice"];
   private jsonObject = false;
+  private parallel = true;
+  private clientInstructions = "";
+  private finalValidator?: ValidateFunction;
+  private validators?: Map<string, ValidateFunction>;
+  output: Record<string, unknown>[] = [];
   lastFailure?: CallerInferenceError;
   constructor(
     readonly tools: ChatCompletionTool[],
     private readonly upstream: string,
     private readonly onCalls: (calls: ModelToolCall[]) => void,
     private readonly onFailure: (error: Error) => void,
+    private readonly nativeTools = false,
+    private readonly responses = false,
   ) {}
 
   setChoice(choice: ChatCompletionRequest["tool_choice"]): void { this.choice = choice; }
 
-  setResponseFormat(format: ChatCompletionRequest["response_format"]): void { this.jsonObject = format?.type === "json_object"; }
+  setParallel(value: boolean | undefined): void { this.parallel = value !== false; }
+  setClientInstructions(value: string): void { this.clientInstructions = value; }
+
+  setResponseFormat(format: ChatCompletionRequest["response_format"]): void {
+    this.jsonObject = format?.type === "json_object";
+    this.finalValidator = this.responses && format?.type === "json_schema"
+      ? compileToolSchemas([{ type: "function", function: { name: "answer", parameters: format.json_schema.schema } }]).get("answer") : undefined;
+  }
 
   validateFinalText(text: string): void {
-    if (!this.jsonObject) return;
+    if (!this.jsonObject && !this.finalValidator) return;
     let value: unknown;
     try { value = JSON.parse(text); } catch { /* Report a static error without model output. */ }
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
+    if (this.finalValidator && !this.finalValidator(value)) throw new CallerInferenceError("caller_invalid_structured_output", "Caller final answer does not match text.format schema");
+    if (this.jsonObject && (!value || typeof value !== "object" || Array.isArray(value))) {
       throw new CallerInferenceError("caller_invalid_json_object", "Caller final answer must be a valid JSON object");
     }
   }
 
   rewriteRequest(body: Record<string, unknown>): Record<string, unknown> {
-    const tools = this.tools.map((tool, i) => ({
+    const externalTools = this.tools.map((tool, i) => ({
       type: "function", name: `caller_tool_${i}`, description: `Caller tool ${tool.function.name}: ${tool.function.description || ""}`,
       parameters: tool.function.parameters || { type: "object", properties: {} },
       ...(tool.function.strict === undefined ? {} : { strict: tool.function.strict }),
     }));
+    const native = this.nativeTools && Array.isArray(body.tools) ? body.tools.filter(tool => !(tool && typeof tool === "object" && typeof tool.name === "string" && /^caller_tool_\d+$/.test(tool.name))) : [];
+    const tools = [...native, ...externalTools];
     const compaction = isCompactionRequest(body);
     const choice = compaction ? "auto" : this.choice;
     const toolChoice = typeof choice === "object"
@@ -54,21 +73,24 @@ export class CallerInference {
     // Suppress deferred/native tool definitions and any Codex tool-search additions.
     const input = Array.isArray(body.input) ? body.input.filter(item => {
       const type = item && typeof item === "object" ? (item as Record<string, unknown>).type : undefined;
-      return type !== "additional_tools" && type !== "tool_search_output";
+      return this.nativeTools || (type !== "additional_tools" && type !== "tool_search_output");
     }) : body.input;
     const scopedInput = Array.isArray(input) ? [...input] : [];
     const jsonInstruction = !compaction && this.jsonObject
       ? "\nFor your final answer, Return ONLY a valid JSON object. Do not include markdown, prose, code fences, or any text outside the JSON object. Tool calls may precede the final answer."
       : "";
-    const boundary = { type: "message", role: "developer", content: [{ type: "input_text", text: CALLER_PERMISSION_INSTRUCTIONS + jsonInstruction }] };
+    const boundary = { type: "message", role: "developer", content: [{ type: "input_text", text: (this.nativeTools ? "External function tools run on the client. Native Codex tools run in the proxy. Do not confuse their paths or permissions." : CALLER_PERMISSION_INSTRUCTIONS) + jsonInstruction }] };
     // CompactionTrigger must remain last; app-server removes it from history
     // after receiving the opaque compaction item.
     scopedInput.splice(compaction ? scopedInput.length - 1 : scopedInput.length, 0, boundary);
-    return { ...body, input: scopedInput, tools: choice === "none" ? [] : tools, tool_choice: toolChoice };
+    if (this.clientInstructions && !compaction) scopedInput.push({ type: "message", role: "developer", content: [{ type: "input_text", text: this.clientInstructions }] });
+    return { ...body, input: scopedInput, tools: choice === "none" ? native : tools, tool_choice: choice === "none" && this.nativeTools ? "auto" : toolChoice, parallel_tool_calls: this.parallel };
   }
 
   validateResponse(sse: string, compaction = false): ModelToolCall[] {
     const calls = new Map<string, ModelToolCall>();
+    const output = new Map<string, Record<string, unknown>>();
+    if (this.responses) this.validators ||= compileToolSchemas(this.tools);
     let completed = false;
     let compactItems = 0;
     const inspect = (item: Record<string, unknown>, partial = false) => {
@@ -78,6 +100,7 @@ export class CallerInference {
         return;
       }
       if (item.type === "message" || item.type === "reasoning") return;
+      if (this.nativeTools && !(item.type === "function_call" && typeof item.name === "string" && item.name.startsWith("caller_tool_"))) return;
       if (item.type !== "function_call") throw new CallerInferenceError("caller_forbidden_tool_item", "Caller inference returned a forbidden tool item");
       const index = this.tools.findIndex((_, i) => item.name === `caller_tool_${i}`);
       if (index < 0 || this.choice === "none") throw new CallerInferenceError("caller_unknown_tool", "Caller inference returned a non-allowlisted tool");
@@ -89,6 +112,8 @@ export class CallerInference {
       let args: unknown;
       try { args = JSON.parse(item.arguments); } catch { throw new CallerInferenceError("caller_invalid_arguments", "Caller inference returned invalid JSON arguments"); }
       if (!args || typeof args !== "object" || Array.isArray(args)) throw new CallerInferenceError("caller_invalid_arguments", "Caller arguments must be a JSON object");
+      const validator = this.validators?.get(this.tools[index].function.name);
+      if (validator && !validator(args)) throw new CallerInferenceError("caller_invalid_arguments", "Caller arguments do not match the function JSON Schema");
       const previous = calls.get(item.call_id);
       if (previous && (previous.name !== this.tools[index].function.name || previous.arguments !== item.arguments)) throw new CallerInferenceError("caller_inconsistent_function_call", "Caller inference changed a completed call");
       calls.set(item.call_id, { callId: item.call_id, name: this.tools[index].function.name, arguments: item.arguments });
@@ -102,6 +127,8 @@ export class CallerInference {
       try { event = JSON.parse(data); } catch { throw new CallerInferenceError("caller_invalid_upstream_sse", "Invalid upstream SSE JSON"); }
       if (event.type === "response.output_item.done" && event.item) {
         inspect(event.item as Record<string, unknown>);
+        const item = event.item as Record<string, unknown>;
+        if (typeof item.id === "string") output.set(item.id, item);
         if (compaction) compactItems++;
       }
       if (event.type === "response.output_item.added" && event.item) {
@@ -113,8 +140,11 @@ export class CallerInference {
       }
       if (event.type === "response.completed") {
         completed = true;
-        const output = (event.response as Record<string, unknown>)?.output;
-        if (Array.isArray(output)) for (const item of output) inspect(item);
+        const finalOutput = (event.response as Record<string, unknown>)?.output;
+        if (Array.isArray(finalOutput) && finalOutput.length) {
+          output.clear();
+          for (const item of finalOutput) { inspect(item); if (typeof item.id === "string") output.set(item.id, item); }
+        }
       }
       if (event.type === "response.failed" || event.type === "error") throw new CallerInferenceError("caller_upstream_response_failed", "Upstream caller inference failed");
     }
@@ -123,6 +153,8 @@ export class CallerInference {
     if (!compaction && (this.choice === "required" || typeof this.choice === "object") && calls.size === 0) {
       throw new CallerInferenceError("caller_tool_choice_violation", "Caller inference did not satisfy tool_choice");
     }
+    if (!compaction && !this.parallel && calls.size > 1) throw new CallerInferenceError("caller_parallel_tool_calls_violation", "Backend returned multiple calls with parallel_tool_calls false");
+    this.output = [...output.values()];
     return [...calls.values()];
   }
 

@@ -21,7 +21,7 @@ This follows the same philosophy as [`claude-proxy`](https://github.com/mehdic/c
 
 ## Status
 
-v0.4.11 local proxy. Working locally with:
+v0.5.0 local proxy. Working locally with:
 
 - non-streaming and streaming `/v1/chat/completions`
 - improved `/v1/responses` compatibility for string input, message arrays, mixed content parts, function-call/function-call-output inputs, reasoning/summary/item-reference inputs, and SDK-friendly streaming event aliases
@@ -95,6 +95,8 @@ Docker's healthcheck probes `/health` without consuming a Codex turn. For a one-
 ## Caller-executed tools (OpenCode)
 
 Use `CODEX_PROXY_TOOL_EXECUTION_MODE=caller` when OpenCode should execute all tools on its own machine. Chat Completions uses app-server dynamic tools and an inference adapter that blocks native Codex tool calls, returns standard JSON/SSE `tool_calls`, and correlates subsequent tool results with isolated TTL-limited workers. `hybrid` remains the default.
+
+Responses supports native function tools, `function_call_output`, bounded `previous_response_id` continuation, explicit history replay and typed SSE. See [Responses function calling](docs/responses-function-calling.md) for curl/SDK examples and limits. Responses hybrid requests retain Codex-native tools alongside external functions.
 
 See [caller tools setup](docs/caller-tools.md) for the supported app-server version, OpenCode/Bifrost configuration, cancellation, tests and buffering limits.
 
@@ -204,7 +206,7 @@ The smoke script uses localhost only and checks `/health`, `/v1/models`, one non
 | `/pricing`, `/v1/pricing` | GET | Public fallback pricing book used for local cost estimates |
 | `/models`, `/v1/models` | GET | OpenAI model list |
 | `/chat/completions`, `/v1/chat/completions` | POST | OpenAI chat-completions-compatible API |
-| `/responses`, `/v1/responses` | POST | OpenAI Responses-style API with text, mixed content markers, function-call context items, streaming aliases, usage, and metadata echoes |
+| `/responses`, `/v1/responses` | POST | OpenAI Responses API with text, native external function calls/results, bounded continuation/replay, typed SSE, usage and metadata |
 
 Use `/health` for frequent process checks. Use `/healthz/deep` for readiness diagnostics because it starts `codex app-server` and consumes a small live turn.
 
@@ -381,7 +383,7 @@ This composable design ensures OpenClaw-dispatched tools and Codex-native capabi
 
 The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
 
-Implemented through v0.4.11 plus the sticky-session implementation branch:
+Implemented through v0.5.0 plus the sticky-session implementation branch:
 
 - pooled/oneshot runtimes, opt-in sticky sessions, pricing/usage reporting, release checklist, LaunchAgent support, and local soak harness
 - configurable Codex sandbox/approval policy for trusted localhost deployments
@@ -405,7 +407,7 @@ Deprioritized unless a real client demands them: model routing, semantic caching
 
 - Codex app-server is JSON-RPC and agent-oriented; this proxy maps it into OpenAI-ish response shapes.
 - `/v1/responses` is improved and useful, but still not full durable OpenAI Responses parity.
-- `previous_response_id` is not yet backed by durable state.
+- `previous_response_id` is backed by bounded volatile state; it is not restart-safe.
 - Image/audio/file inputs are flattened or represented as placeholders; real multimodal transport is not implemented yet.
 - Approval UI/bridge support is not implemented yet.
 - The proxy uses stdio transport. Codex WebSocket transport is documented as experimental/unsupported, so it is intentionally avoided.

@@ -1,3 +1,4 @@
+import { RESPONSE_STATE } from "../responses/http.js";
 import { CALLER_RUNTIME } from "../caller/runtime.js";
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { createServer, type Server } from "node:http";
@@ -108,6 +109,7 @@ export async function stopServer(graceMs = CONFIG.shutdownGraceMs): Promise<void
   drainGlobalPool();
   drainGlobalSessions();
   await CALLER_RUNTIME.drain();
+  RESPONSE_STATE.clear();
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {

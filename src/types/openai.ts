@@ -41,6 +41,7 @@ export interface ChatCompletionRequest {
   tools?: ChatCompletionTool[];
   tool_choice?: "none" | "auto" | "required" | ChatCompletionNamedToolChoice;
   response_format?: ResponseFormat;
+  parallel_tool_calls?: boolean;
   codex_proxy?: CodexProxyRequestExtension;
 }
 
@@ -180,15 +181,30 @@ export interface ResponseRequest {
   top_p?: number;
   max_output_tokens?: number;
   user?: string;
-  tools?: ChatCompletionTool[];
-  tool_choice?: "none" | "auto" | "required" | ChatCompletionNamedToolChoice;
+  tools?: (ResponseFunctionTool | ChatCompletionTool)[];
+  tool_choice?: "none" | "auto" | "required" | { type: "function"; name: string } | ChatCompletionNamedToolChoice;
+  parallel_tool_calls?: boolean;
+  text?: { format?: ResponseTextFormat };
+  store?: boolean;
   response_format?: ResponseFormat;
-  /** Optional: ID of a previous response for multi-turn chaining. Accepted but not used for server-side lookup. */
+  /** Owner-isolated, bounded in-memory conversation reference. */
   previous_response_id?: string;
   /** Optional: arbitrary key-value metadata echoed back in the response. */
   metadata?: Record<string, string> | null;
   codex_proxy?: CodexProxyRequestExtension;
 }
+
+export interface ResponseFunctionTool {
+  type: "function";
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  strict?: boolean | null;
+}
+
+export type ResponseTextFormat =
+  | { type: "text" | "json_object" }
+  | { type: "json_schema"; name: string; schema: Record<string, unknown>; strict?: boolean };
 
 export type ResponseInputItem =
   | ResponseInputMessage
@@ -199,7 +215,7 @@ export type ResponseInputItem =
   | ResponseInputSummaryText;
 
 export interface ResponseInputMessage {
-  type?: "message" | string;
+  type?: "message";
   role: "user" | "assistant" | "system" | "developer" | string;
   content: string | ResponseContentPart[];
 }
@@ -256,13 +272,21 @@ export interface ResponseObject {
   status: "completed" | "failed" | "in_progress";
   output: ResponseOutputItem[];
   output_text?: string;
-  usage?: ResponseUsage;
+  usage?: ResponseUsage | null;
   error?: { message: string; code: string } | null;
   instructions?: string | null;
   metadata?: Record<string, string> | null;
   previous_response_id?: string | null;
   temperature?: number | null;
   top_p?: number | null;
+  tools?: ResponseFunctionTool[];
+  tool_choice?: ResponseRequest["tool_choice"];
+  parallel_tool_calls?: boolean;
+  text?: { format: ResponseTextFormat };
+  store?: boolean;
+  reasoning?: ResponseRequest["reasoning"];
+  incomplete_details?: null;
+  max_output_tokens?: number | null;
 }
 
 export type ResponseOutputContentPart =
@@ -274,7 +298,18 @@ export interface ResponseAnnotation {
   [key: string]: unknown;
 }
 
-export interface ResponseOutputItem {
+export type ResponseOutputItem = ResponseOutputMessage | ResponseOutputFunctionCall;
+
+export interface ResponseOutputFunctionCall {
+  type: "function_call";
+  id: string;
+  call_id: string;
+  name: string;
+  arguments: string;
+  status: "completed";
+}
+
+export interface ResponseOutputMessage {
   type: "message";
   id: string;
   role: "assistant";

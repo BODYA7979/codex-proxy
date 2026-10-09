@@ -124,7 +124,7 @@ test("hybrid required leaves tool selection to the model and retains synthetic s
 });
 
 test("caller version gate honors the verified protocol baseline", () => {
-  for (const version of ["0.162.0-alpha.2", "0.162.0-alpha.10", "0.162.0", "0.163.0", "1.0.0"]) assert.equal(supportsCallerVersion(`codex-cli ${version}`), true);
+  for (const version of ["0.162.0-alpha.2", "0.162.0-alpha.17.2", "0.162.0-alpha.10", "0.162.0", "0.163.0", "1.0.0"]) assert.equal(supportsCallerVersion(`codex-cli ${version}`), true);
   for (const version of ["0.160.0", "0.162.0-alpha.1", "unknown"]) assert.equal(supportsCallerVersion(`codex-cli ${version}`), false);
 });
 
@@ -147,8 +147,10 @@ test("isolated caller credentials preserve official token refresh and cleanup re
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("Responses API rejects caller mode instead of bypassing the execution boundary", async () => {
+test("Responses API routes caller mode through the shared execution boundary", async t => {
   const { createApp } = await import("../server/index.js");
+  const { CALLER_RUNTIME } = await import("../caller/runtime.js");
+  const run = t.mock.method(CALLER_RUNTIME, "run", async () => ({ text: "OK", turnId: "fixture", threadId: "fixture", usage: null, durationMs: null, finishReason: "stop" }));
   const previous = CONFIG.toolExecutionMode;
   const api = createServer(createApp());
   api.listen(0, "127.0.0.1"); await once(api, "listening");
@@ -156,11 +158,14 @@ test("Responses API rejects caller mode instead of bypassing the execution bound
   try {
     CONFIG.toolExecutionMode = "caller";
     const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: "Read a file" }) });
-    assert.equal(response.status, 400);
-    assert.equal((await response.json() as any).error.code, "unsupported_tool_execution_mode");
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).output_text, "OK");
     CONFIG.toolExecutionMode = "hybrid";
     const explicit = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: "Read a file", codex_proxy: { tool_execution_mode: "caller" } }) });
-    assert.equal(explicit.status, 400);
+    assert.equal(explicit.status, 200);
+    assert.equal(run.mock.calls.length, 2);
+    assert.equal(run.mock.calls[0].arguments[2]!.responses, true);
+    assert.equal(run.mock.calls[0].arguments[2]!.nativeTools, false);
   } finally { CONFIG.toolExecutionMode = previous; api.closeAllConnections(); await new Promise<void>(resolve => api.close(() => resolve())); }
 });
 
