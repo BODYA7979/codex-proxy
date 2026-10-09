@@ -232,7 +232,7 @@ export interface ResponseInputFunctionCall {
 export interface ResponseInputFunctionCallOutput {
   type: "function_call_output";
   call_id: string;
-  output: string;
+  output: string | ResponseContentPart[];
   id?: string;
 }
 
@@ -246,8 +246,10 @@ export interface ResponseInputReasoning {
 
 export interface ResponseInputItemReference {
   type: "item_reference";
-  item_id: string;
+  /** Native Responses item identifier. */
   id?: string;
+  /** Legacy alias accepted by this fork. */
+  item_id?: string;
 }
 
 export interface ResponseInputSummaryText {

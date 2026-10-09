@@ -1,5 +1,6 @@
 import type { ResponseInputItem, ResponseRequest, ResponseOutputItem, ChatCompletionTool } from "../types/openai.js";
 import { CallerRequestError } from "../caller/runtime.js";
+import { isDeepStrictEqual } from "node:util";
 
 interface Entry {
   owner: string;
@@ -12,6 +13,7 @@ interface Entry {
   busy: boolean;
   expires: number;
   bytes: number;
+  itemKeys: string[];
 }
 export interface PreparedResponse {
   input: ResponseInputItem[];
@@ -28,19 +30,32 @@ export interface PreparedResponse {
 export class ResponseState {
   private readonly entries = new Map<string, Entry>();
   private readonly calls = new Map<string, Entry>();
+  private readonly items = new Map<string, { entry: Entry; item: ResponseInputItem }>();
   private bytes = 0;
   constructor(private readonly limits: () => { ttl: number; entries: number; bytes: number; historyBytes: number }, private readonly now = Date.now) {}
   private remove(id: string, entry: Entry): void {
     this.entries.delete(id); this.bytes -= entry.bytes;
+    for (const key of entry.itemKeys) if (this.items.get(key)?.entry === entry) this.items.delete(key);
     for (const call of entry.pending) if (this.calls.get(call) === entry) this.calls.delete(call);
   }
   sweep(): void { for (const [id, entry] of this.entries) if (entry.expires <= this.now() && !entry.busy) this.remove(id, entry); }
-  clear(): void { this.entries.clear(); this.calls.clear(); this.bytes = 0; }
+  clear(): void { this.entries.clear(); this.calls.clear(); this.items.clear(); this.bytes = 0; }
 
   prepare(owner: string, body: ResponseRequest, incoming: ResponseInputItem[], model: string, suppliedTools: ChatCompletionTool[], mode?: string): PreparedResponse {
     this.sweep();
     const previous = body.previous_response_id ? this.entries.get(body.previous_response_id) : undefined;
     if (body.previous_response_id && (!previous || previous.owner !== owner)) throw new CallerRequestError("Unknown, expired or foreign previous_response_id", 400, "previous_response_not_found");
+    const explicit = new Map<string, ResponseInputItem>();
+    for (const item of [...(previous?.history || []), ...incoming]) if (item && item.type !== "item_reference" && "id" in item && typeof item.id === "string") explicit.set(item.id, item);
+    incoming = incoming.map(item => {
+      if (!item || item.type !== "item_reference") return item;
+      const ref = item as { id?: string; item_id?: string };
+      const id = ref.id ?? ref.item_id;
+      if (typeof id !== "string" || !id || (ref.id && ref.item_id && ref.id !== ref.item_id)) throw new CallerRequestError("item_reference requires one valid id");
+      const found = explicit.get(id) || this.items.get(JSON.stringify([owner, id]))?.item;
+      if (!found) throw new CallerRequestError("Unknown, expired or foreign item_reference; replay the full item content", 400, "item_reference_not_found");
+      return structuredClone(found);
+    });
     const input = previous ? [...previous.history, ...incoming] : [...incoming];
     const pendingCalls = new Map<string, ResponseInputItem>();
     const answered = new Set<string>();
@@ -72,8 +87,12 @@ export class ResponseState {
       for (const id of ids) {
         const expected = pending.history.find(item => item.type === "function_call" && (item as { call_id: string }).call_id === id);
         const actual = input.find(item => item.type === "function_call" && (item as { call_id: string }).call_id === id);
-        const fields = (item: ResponseInputItem | undefined) => { const call = item as { name: string; arguments: string }; return [call?.name, call?.arguments]; };
-        if (JSON.stringify(fields(expected)) !== JSON.stringify(fields(actual))) throw new CallerRequestError("Replayed function call differs from issued call");
+        const fields = (item: ResponseInputItem | undefined) => {
+          const call = item as { name: string; arguments: string };
+          try { return [call?.name, JSON.parse(call.arguments)]; }
+          catch { throw new CallerRequestError("Invalid replayed function arguments"); }
+        };
+        if (!isDeepStrictEqual(fields(expected), fields(actual))) throw new CallerRequestError("Replayed function call differs from issued call");
       }
     }
     const resolvedModel = body.model ? model : previous?.model || pending?.model || model;
@@ -108,8 +127,14 @@ export class ResponseState {
             this.remove(...victim);
           }
           const entry: Entry = { owner, history: structuredClone(history), model: resolvedModel, tools: structuredClone(tools), execution: structuredClone(execution),
-            pending: output.filter(item => item.type === "function_call").map(item => item.call_id), used: false, busy: false, expires: this.now() + limit.ttl, bytes };
+            pending: output.filter(item => item.type === "function_call").map(item => item.call_id), used: false, busy: false, expires: this.now() + limit.ttl, bytes, itemKeys: [] };
           this.entries.set(id, entry); this.bytes += bytes;
+          // Index owned items from the entire retained lineage, so referenced
+          // context remains available while a conversation is actively replayed.
+          for (const item of entry.history) if ("id" in item && typeof item.id === "string") {
+            const key = JSON.stringify([owner, item.id]);
+            this.items.set(key, { entry, item }); entry.itemKeys.push(key);
+          }
           for (const call of entry.pending) this.calls.set(call, entry);
         }
         if (pending) { pending.used = true; pending.busy = false; }

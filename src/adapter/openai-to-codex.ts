@@ -1,3 +1,4 @@
+import { functionOutputText } from "./function-tools.js";
 /**
  * Adapter: OpenAI API request → Codex app-server input.
  *
@@ -180,7 +181,7 @@ function responsesInputToPrompt(items: ResponseInputItem[]): string {
     // Handle function_call_output input items
     if (raw.type === "function_call_output") {
       const callId = typeof raw.call_id === "string" ? raw.call_id : "unknown";
-      const output = typeof raw.output === "string" ? raw.output : "";
+      const output = functionOutputText(raw.output);
       parts.push(`<tool_result call_id="${escapeXmlAttribute(callId)}">\n${output}\n</tool_result>\n`);
       continue;
     }

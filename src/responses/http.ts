@@ -47,7 +47,7 @@ export async function handleResponsesRequest(req: Request, res: Response, native
   const requestId = String(res.locals.requestId || randomUUID());
   // Request IDs are caller supplied and may repeat. Response IDs must not.
   const responseId = `resp_${randomUUID().replace(/-/g, "")}`;
-  const messageId = `msg_${randomUUID().replace(/-/g, "")}`;
+  const messageId = `msg_${responseId}_0`;
   const started = Date.now();
   let model = resolveModel(body.model), status: "ok" | "error" = "error", stage = "request_parsing";
   let prepared: PreparedResponse | undefined, keepalive: NodeJS.Timeout | undefined;
@@ -135,7 +135,7 @@ export async function handleResponsesRequest(req: Request, res: Response, native
       response.output = result.text ? response.output : [];
       response.output.push(...result.toolCalls.map(call => ({ type: "function_call" as const, id: `fc_${randomUUID().replace(/-/g, "")}`, call_id: call.id, name: call.function.name, arguments: call.function.arguments, status: "completed" as const })));
     }
-    response.output = response.output.map(item => item.type === "message" ? { ...item, content: item.content.map(part => part.type === "output_text" ? { ...part, annotations: part.annotations || [] } : part) } : item);
+    response.output = response.output.map((item, index) => item.type === "message" ? { ...item, id: `msg_${responseId}_${index}`, content: item.content.map(part => part.type === "output_text" ? { ...part, annotations: part.annotations || [] } : part) } : item);
     response.output_text = response.output.filter(item => item.type === "message").flatMap(item => item.content).map(part => part.type === "output_text" ? part.text : "").join("");
     if (response.status === "failed") throw new CodexProxyError("codex", "Codex response failed");
     prepared.commit(responseId, response.output);

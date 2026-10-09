@@ -184,3 +184,42 @@ test("official SDK HTTP integration covers mixed parallel items, previous_respon
     assert.equal(accumulated, "Hello");
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); RESPONSE_STATE.clear(); }
 });
+
+test("item references resolve owner-scoped message/function items and preserve active lineage", () => {
+  let now = 1; const store = state(() => now); const catalog = normalizeResponsesTools(body);
+  const message = { type: "message" as const, id: "msg_source", role: "assistant" as const, status: "completed" as const, content: [{ type: "output_text" as const, text: "Original assistant context" }] };
+  store.prepare("owner", body, normalizeInput(body.input), "gpt-5.5", catalog).commit("resp_1", [message, functionCall()]);
+  const incoming = [{ type: "item_reference" as const, id: "msg_source" }, { type: "item_reference" as const, id: "fc_call_1" }, output()];
+  const next = store.prepare("owner", { ...body, input: incoming }, incoming, "gpt-5.5", catalog);
+  assert.equal(next.input[0].type, "message"); assert.equal(next.input[1].type, "function_call");
+  const chat = responsesToChat(body, next.input, catalog); assert.equal(chat.messages[0].content?.[0] && (chat.messages[0].content as any[])[0].text, "Original assistant context");
+  now = 60; next.commit("resp_2", []); next.release();
+  now = 120; store.sweep();
+  assert.doesNotThrow(() => store.prepare("owner", { input: incoming[0] as any }, [incoming[0]], "gpt-5.5", catalog));
+  assert.throws(() => store.prepare("foreign", body, [incoming[0]], "gpt-5.5", catalog), { code: "item_reference_not_found" });
+  now = 161; store.sweep();
+  assert.throws(() => store.prepare("owner", body, [incoming[0]], "gpt-5.5", catalog), { code: "item_reference_not_found" });
+  for (const item of [{ type: "item_reference" }, { type: "item_reference", id: "msg_a", item_id: "msg_b" }]) assert.throws(() => store.prepare("owner", body, [item] as any, "gpt-5.5", catalog));
+});
+
+test("content-array tool outputs retain text order and reject unsupported media", () => {
+  const input = [functionCall(), { type: "function_call_output" as const, call_id: "call_1", output: [{ type: "input_text", text: "First result" }, { type: "input_text", text: '{"second":true}' }] }];
+  const chat = responsesToChat({ ...body, input }, input);
+  assert.equal(chat.messages.at(-1)?.content, 'First result\n{"second":true}');
+  assert.throws(() => responsesToChat(body, [functionCall(), { ...input[1], output: [{ type: "input_image", image_url: "https://example.com/image" }] }] as any), { code: "unsupported_tool_output" });
+});
+
+test("replayed calls compare JSON values while protecting actual arguments", () => {
+  const catalog = normalizeResponsesTools(body); const store = state();
+  const original = { ...functionCall(), arguments: '{ "city": "Kyiv", "option": 1 }' };
+  store.prepare("owner", body, normalizeInput(body.input), "gpt-5.5", catalog).commit("resp_1", [original]);
+  const replay = [...normalizeInput(body.input), { ...original, arguments: '{"option":1,"city":"Kyiv"}' }, output()];
+  const next = store.prepare("owner", body, replay, "gpt-5.5", catalog); next.release();
+  assert.throws(() => store.prepare("owner", body, [...normalizeInput(body.input), { ...original, arguments: '{"option":2,"city":"Kyiv"}' }, output()], "gpt-5.5", catalog), /differs/);
+});
+
+test("native text replay includes content-array function results", async () => {
+  const { responsesRequestToOptions } = await import("../adapter/openai-to-codex.js");
+  const { prompt } = responsesRequestToOptions({ input: [functionCall(), { type: "function_call_output", call_id: "call_1", output: [{ type: "input_text", text: "First payload" }, { type: "input_text", text: "Second payload" }] }] });
+  assert.match(prompt, /First payload\nSecond payload/);
+});

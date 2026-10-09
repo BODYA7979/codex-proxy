@@ -16,3 +16,14 @@ export function compileToolSchemas(tools: ChatCompletionTool[]): Map<string, Val
   }
   return validators;
 }
+
+/** Text content-array results from AI SDK are ordered client results, not
+ * assistant input. Preserve each part without discarding unsupported media. */
+export function functionOutputText(output: unknown): string {
+  if (typeof output === "string") return output;
+  if (!Array.isArray(output)) throw new CallerRequestError("function_call_output must be a string or content array");
+  return output.map(part => {
+    if (!part || typeof part !== "object" || !["input_text", "output_text", "text"].includes(part.type) || typeof part.text !== "string") throw new CallerRequestError("Only text function output parts are supported", 400, "unsupported_tool_output");
+    return part.text;
+  }).join("\n");
+}

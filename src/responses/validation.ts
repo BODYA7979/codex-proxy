@@ -2,7 +2,7 @@ import type { ChatCompletionRequest, ChatCompletionTool, ChatMessage, ResponseRe
 import { CallerRequestError, validateCallerRequest } from "../caller/runtime.js";
 
 export { compileToolSchemas } from "../adapter/function-tools.js";
-import { compileToolSchemas } from "../adapter/function-tools.js";
+import { compileToolSchemas, functionOutputText } from "../adapter/function-tools.js";
 
 export function normalizeResponsesTools(body: ResponseRequest): ChatCompletionTool[] {
   if (body.tools !== undefined && !Array.isArray(body.tools)) throw new CallerRequestError("tools must be an array");
@@ -73,8 +73,8 @@ export function responsesToChat(body: ResponseRequest, input: ResponseInputItem[
       if (!args || typeof args !== "object" || Array.isArray(args)) throw new CallerRequestError("Function arguments must be a JSON object");
       messages.push({ role: "assistant", content: null, tool_calls: [{ id: item.call_id, type: "function", function: { name: item.name, arguments: item.arguments } }] });
     } else if (item.type === "function_call_output") {
-      if (typeof item.call_id !== "string" || !item.call_id || typeof item.output !== "string") throw new CallerRequestError("function_call_output requires call_id and string output; multimodal tool outputs are unsupported");
-      messages.push({ role: "tool", tool_call_id: item.call_id, content: item.output });
+      if (typeof item.call_id !== "string" || !item.call_id) throw new CallerRequestError("function_call_output requires call_id");
+      messages.push({ role: "tool", tool_call_id: item.call_id, content: functionOutputText(item.output) });
     } else if (item.type === "reasoning" || item.type === "summary_text") {
       const raw = item as { content?: unknown; summary?: Array<{ text?: string }>; text?: string };
       const text = typeof raw.content === "string" ? raw.content : raw.text || raw.summary?.map(part => part.text || "").join("\n");
