@@ -66,7 +66,8 @@ export type ResponseFormat =
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "developer" | "tool";
-  content: string | ContentPart[] | null;
+  // Assistant function-call messages may omit content; other roles require it.
+  content?: string | ContentPart[] | null;
   tool_calls?: ChatCompletionToolCall[];
   tool_call_id?: string;
   name?: string;

@@ -31,6 +31,23 @@ test("caller config defaults to hybrid and validates request overrides", () => {
   assert.throws(() => validateCallerRequest({ ...request, tools: [], tool_choice: "required" }));
 });
 
+test("caller accepts omitted assistant content only with valid function tool calls", () => {
+  const toolCall = { id: "call_history", type: "function", function: { name: "read", arguments: '{"path":"README.md"}' } };
+  const validate = (message: object) => validateCallerRequest({ ...request, messages: [message] } as ChatCompletionRequest);
+  assert.doesNotThrow(() => validate({ role: "assistant", tool_calls: [toolCall] }));
+  assert.doesNotThrow(() => validate({ role: "assistant", content: null, tool_calls: [toolCall] }));
+  assert.doesNotThrow(() => validate({ role: "assistant", tool_calls: [toolCall, { ...toolCall, id: "call_parallel" }] }));
+  for (const message of [
+    { role: "assistant" }, { role: "assistant", tool_calls: [] }, { role: "assistant", tool_calls: {} },
+    { role: "user", tool_calls: [toolCall] }, { role: "system", tool_calls: [toolCall] },
+    { role: "tool", tool_call_id: "call_history" },
+    { role: "assistant", content: 42, tool_calls: [toolCall] },
+    ...[null, {}, { ...toolCall, type: "custom" }, { ...toolCall, id: "" },
+      { ...toolCall, function: { name: "read", arguments: {} } },
+      { ...toolCall, function: { arguments: "{}" } }].map(call => ({ role: "assistant", tool_calls: [call] })),
+  ]) assert.throws(() => validate(message), /Invalid messages/);
+});
+
 test("inference boundary removes all native tools and honors all tool_choice values", () => {
   const adapter = new CallerInference(tools, "https://example.invalid", () => {}, () => {});
   const input = { tools: [{ type: "custom", name: "apply_patch" }, { type: "function", name: "exec_command" }], input: [{ type: "additional_tools", tools: [] }, { type: "message", role: "user", content: "list files" }] };

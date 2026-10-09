@@ -150,4 +150,6 @@ Current limits: function tools with JSON object arguments only; complete result 
 
 `response_format: {"type":"json_object"}` accepts arbitrary object fields. The adapter instructs the model to return only JSON and validates the completed final answer before releasing it to the client; invalid JSON, arrays and scalar values fail with `caller_invalid_json_object`. Tool-call segments remain available, and the JSON requirement persists through continuations without constraining compaction. This mode does not pass a fabricated schema to Codex: `outputSchema` enables strict Structured Outputs and cannot represent arbitrary JSON objects. Explicit `json_schema` requests still use the supplied schema.
 
+Assistant messages with nonempty, valid function `tool_calls` may omit `content`, as permitted by Chat Completions. This includes Bifrost continuations that omit `content: null` during serialization. Other roles and assistant messages without valid tool calls still require content. Continuation ownership, tool-call IDs and complete result batches are checked independently.
+
 The reported historical `/app` sandbox attempt is not confirmed by available local proxy logs. Absence of an OpenCode tool event alone does not identify the executing process; correlate original proxy/app-server logs by time/request ID before attributing that incident.

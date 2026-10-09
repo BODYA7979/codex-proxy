@@ -43,7 +43,13 @@ export function validateCallerRequest(body: ChatCompletionRequest): void {
     throw new CallerRequestError("caller mode uses tool_call_id correlation; sticky sessions are unsupported");
   }
   if (!body.messages.every(message => message && typeof message === "object" && ["system", "developer", "user", "assistant", "tool"].includes(message.role)
-      && (message.content === null || typeof message.content === "string" || Array.isArray(message.content))
+      && (message.content === null || typeof message.content === "string" || Array.isArray(message.content)
+        // OpenAI-compatible gateways omit null content on tool-only messages.
+        || (message.content === undefined && message.role === "assistant" && Array.isArray(message.tool_calls)
+          && message.tool_calls.length > 0 && message.tool_calls.every(call => call?.type === "function"
+            && typeof call.id === "string" && call.id.length > 0
+            && typeof call.function?.name === "string" && call.function.name.length > 0
+            && typeof call.function.arguments === "string")))
       && (message.role !== "tool" || (typeof message.tool_call_id === "string" && message.tool_call_id.length > 0)))) {
     throw new CallerRequestError("Invalid messages");
   }

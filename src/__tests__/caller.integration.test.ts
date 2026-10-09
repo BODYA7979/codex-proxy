@@ -80,7 +80,11 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
       const text = JSON.stringify(body.input);
       const outputs = body.input.filter((item: any) => item.type === "function_call_output");
       let output: Record<string, unknown>[];
-      if (text.includes("SCENARIO:json-object")) {
+      if (text.includes("SCENARIO:tool-only") && !outputs.length) {
+        output = [call(0, "batch_a", { command: "ls", description: "List files" }), call(1, "batch_b", { path: "README.md" })];
+      }
+      else if (text.includes("SCENARIO:tool-only") && outputs.length === 2) output = [call(1, "second", { path: "client.txt" })];
+      else if (text.includes("SCENARIO:json-object")) {
         if (body.text?.format?.type === "json_schema") { res.writeHead(400).end("JSON object mode must not invent a strict output schema"); return; }
         assert.match(text, /Return ONLY a valid JSON object/);
         const invalid = text.includes("SCENARIO:json-object-invalid");
@@ -185,6 +189,27 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
       assert.doesNotMatch(foreign.body.error.message, /400/);
     });
 
+    for (const target of targets) for (const streaming of [false, true]) {
+      await t.test(`${target.name}: tool-only assistant history continues without content (${streaming ? "SSE" : "JSON"})`, async () => {
+        const messages: ChatMessage[] = [{ role: "user", content: "SCENARIO:tool-only Read facts using client tools." }];
+        for (const count of [2, 1]) {
+          const result = await completion(target.url, messages, "tool-only", streaming, target.extra);
+          assert.equal(result.status, 200, JSON.stringify(result.body));
+          const assistant = result.body.choices[0].message;
+          assert.equal(assistant.content, null);
+          assert.equal(assistant.tool_calls.length, count);
+          // Direct clients can omit it; Bifrost drops null during serialization.
+          if (target.name === "direct") delete assistant.content;
+          messages.push(assistant, ...assistant.tool_calls.map((call: ChatCompletionToolCall) => ({ role: "tool" as const, tool_call_id: call.id, content: `result for ${call.function.name}` })));
+        }
+        const final = await completion(target.url, messages, "tool-only", streaming, target.extra);
+        assert.equal(final.status, 200, JSON.stringify(final.body));
+        assert.equal(final.body.choices[0].finish_reason, "stop");
+        assert.match(final.body.choices[0].message.content, /result for read/);
+        assert.equal(final.body.choices[0].message.tool_calls, undefined);
+      });
+    }
+
     await t.test("required selects second tool; named and none choices; structured final output", async () => {
       for (const choice of ["required", { type: "function", function: { name: "read" } }] as const) {
         const messages: ChatMessage[] = [{ role: "user", content: "SCENARIO:choice" }];
@@ -194,6 +219,7 @@ test("caller execution through real app-server and optional Bifrost/OpenCode", {
         messages.push(assistant, { role: "tool", tool_call_id: assistant.tool_calls[0].id, content: "success" });
         assert.equal((await completion(direct, messages, "choice", false)).body.choices[0].finish_reason, "stop");
       }
+
       const a = await completion(direct, [{ role: "user", content: "SCENARIO:none" }], "none", true, { tool_choice: "none", response_format: { type: "json_schema", json_schema: { name: "Result", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false }, strict: true } } });
       assert.equal(a.status, 200, JSON.stringify(a.body)); assert.deepEqual(JSON.parse(a.body.choices[0].message.content), { ok: true });
       assert.equal(a.body.choices[0].message.tool_calls, undefined);
