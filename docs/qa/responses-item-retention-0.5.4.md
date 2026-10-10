@@ -16,7 +16,8 @@ The defect was coupling item-reference retention to the ten-minute worker/full-r
 
 - Added regression tests fail against the previous release for idle/history expiry and response eviction/deduplicated LRU retention.
 - Unit tests verify actual content restoration, complete call/output replay after pending-state expiry, cross-owner rejection, item expiry, byte/count bounds, refresh/deduplication, oversized admission, clear, and nonstored responses.
-- Exact `@ai-sdk/openai@4.0.20` JSON/SSE tests continue through the real installed app-server and local Bifrost after deliberately expiring completed-response histories and closing workers. Synthetic inference preserves the two-round tool cycle and content-array results.
+- Exact `@ai-sdk/openai@4.0.20` JSON/SSE tests continue through the real installed app-server and local Bifrost after deliberately expiring completed-response histories and closing workers. Synthetic inference preserves the two-round tool cycle and content-array results; the fresh worker's inference request is checked for both earlier assistant texts, actual client results and the final answer.
+- Production containers on linux/amd64 and linux/arm64 pass the SDK/two-round/SSE cycle on pinned Codex 0.162.0-alpha.2. After a shortened history TTL, `previous_response_id` fails as expected while item-reference replay succeeds with the original assistant context and results. The fixture distinguishes fresh-worker serialized history from live RPC outputs.
 - Full suite with all caller/Responses/Bifrost integrations enabled: **201 passed, 0 failed, 0 skipped**. Type checking and diff checks pass.
 - Private log/tool content was inspected locally only. No private workflow was run or sent to a live model. The supplied log does not contain the original assistant messages needed for an exact historical-content replay.
 

@@ -39,6 +39,12 @@ test("n8n AI SDK 4.0.20 stored item replay and content-array results", { skip: !
     try {
       let text = ""; for await (const chunk of req) text += chunk;
       const body = JSON.parse(text); const outputs = body.input.filter((item: any) => item.type === "function_call_output");
+      const replay = JSON.stringify(body.input);
+      if (replay.includes("Continue from the same history")) {
+        for (const context of ["Checking client data", "Checking one more item", "CLIENT_PART_ONE", "CLIENT_PART_TWO", "Final result:"]) assert.ok(replay.includes(context), `Missing restored context: ${context}`);
+        assert.ok(!body.input.some((item: any) => item.type === "item_reference"));
+        res.writeHead(200, { "content-type": "text/event-stream" }).end(sse([message("Retained context verified after idle expiry")])); return;
+      }
       const items = !outputs.length ? [message("Checking client data"), call("first", "one"), call("second", "two")]
         : outputs.length === 2 ? [message("Checking one more item"), call("third", "three")]
           : [message("Final result: CLIENT_PART_ONE / CLIENT_PART_TWO")];
@@ -100,7 +106,8 @@ test("n8n AI SDK 4.0.20 stored item replay and content-array results", { skip: !
       // SDK-built history with references to both earlier response segments.
       prompt.push({ role: "assistant", content: last.content.filter(part => part.type === "text").map(part => ({ type: "text", text: part.text, providerOptions: part.providerMetadata })) });
       prompt.push({ role: "user", content: [{ type: "text", text: "Continue from the same history" }] });
-      const continued = await run(); assert.ok(continued.content.length); // new thread replays after history/worker expiry
+      const continued = await run(); // new thread replays after history/worker expiry
+      assert.match(continued.content.filter(part => part.type === "text").map(part => part.text).join(""), /Retained context verified after idle expiry/);
       const refs = requests.at(-1).input.filter((item: any) => item.type === "item_reference"); assert.ok(refs.length >= 3);
       received.push({ target: target.name, streaming, references: refs.length });
     });
