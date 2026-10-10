@@ -6,6 +6,7 @@ test("parseConfig applies safe defaults", () => {
   const cfg = parseConfig({});
   assert.equal(cfg.host, "127.0.0.1");
   assert.equal(cfg.port, 3466);
+  assert.equal(cfg.responseItemTtlMs, 86_400_000);
   assert.equal(cfg.defaultTimeoutMs, 120_000);
   assert.equal(cfg.shutdownGraceMs, 10_000);
   assert.equal(cfg.runtime, "pool");
@@ -28,6 +29,7 @@ test("parseConfig applies safe defaults", () => {
 test("parseConfig reads env overrides and clamps invalid numbers", () => {
   const cfg = parseConfig({
     CODEX_PROXY_HOST: "0.0.0.0",
+    CODEX_PROXY_RESPONSE_ITEM_TTL_MS: "172800000",
     CODEX_PROXY_PORT: "3470",
     CODEX_PROXY_TIMEOUT_MS: "90000",
     CODEX_PROXY_TURN_START_TIMEOUT_MS: "bad",
@@ -50,6 +52,7 @@ test("parseConfig reads env overrides and clamps invalid numbers", () => {
   });
 
   assert.equal(cfg.host, "0.0.0.0");
+  assert.equal(cfg.responseItemTtlMs, 172_800_000);
   assert.equal(cfg.port, 3470);
   assert.equal(cfg.defaultTimeoutMs, 90_000);
   assert.equal(cfg.turnStartTimeoutMs, 10_000);
@@ -74,9 +77,11 @@ test("parseConfig reads env overrides and clamps invalid numbers", () => {
 test("parseConfig falls back for invalid Codex sandbox and approval values", () => {
   const cfg = parseConfig({
     CODEX_PROXY_SANDBOX: "root-mode",
+    CODEX_PROXY_RESPONSE_ITEM_TTL_MS: "0",
     CODEX_PROXY_APPROVAL_POLICY: "always-yes",
   });
 
   assert.equal(cfg.codexSandbox, "read-only");
+  assert.equal(cfg.responseItemTtlMs, 86_400_000);
   assert.equal(cfg.codexApprovalPolicy, "never");
 });

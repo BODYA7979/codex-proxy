@@ -29,7 +29,7 @@ Every emitted message and function call retains its relative output order. Tool-
 
 Send `previous_response_id` with exactly one `function_call_output` for every pending call. Supply string outputs (including JSON encoded as a string) or text content arrays. `input_text`, `output_text`, and `text` parts are joined in order with newlines; unsupported media parts return an explicit error. The pending app-server RPCs receive these results and the original turn continues, including additional tool rounds.
 
-`item_reference` accepts the native `id` field (and legacy `item_id` alias). References resolve actual cached message/function items scoped to the request owner before history validation. Retained lineage keeps ancestor items available while the conversation is actively replayed; the cache shares the existing TTL/entry/byte limits. Foreign, unknown, expired or restart-invalidated references return `item_reference_not_found`, never an empty placeholder. Clients must resend inline content or use a fresh conversation after cache loss. Message IDs remain stable across streaming events and final response items.
+`item_reference` accepts the native `id` field (and legacy `item_id` alias). References resolve actual cached message/function items scoped to the request owner before history validation. Referenced items are retained independently of live workers and full response histories. Each owner/item pair is stored once; successful stored replay refreshes its idle retention (24 hours by default via `CODEX_PROXY_RESPONSE_ITEM_TTL_MS`). Expiry or eviction of a full response history does not delete its retained items. Once the worker expires, complete function-call/output pairs can start a fresh worker with the restored messages. Foreign, unknown, expired or restart-invalidated references return `item_reference_not_found`, never an empty placeholder. Clients must resend inline content or use a fresh conversation after cache loss. Message IDs remain stable across streaming events and final response items.
 
 Model and tool definitions can be omitted when the referenced response is stored; they are inherited. Explicit changes to model/catalog, execution mode, reasoning or text format during a pending turn are rejected, because its harness is already running. Omitted reasoning/text format retain the pending turn's settings. `tool_choice` can change each round. Top-level `instructions` apply to the current request only: resend instructions when desired; previous top-level instructions are not restored by `previous_response_id`.
 
@@ -41,11 +41,12 @@ Stored state is volatile and bounded:
 
 - TTL: `CODEX_PROXY_CALLER_TTL_MS` (default 10 minutes).
 - Maximum entries: `8 × CODEX_PROXY_CALLER_MAX_SESSIONS` (default 256).
-- Total cached history/catalog/execution payload: 32 MiB; per history: 1 MiB.
+- Full response history/catalog/execution payload: 32 MiB; per history: 1 MiB.
+- Separate item-reference cache: 24-hour idle TTL (`CODEX_PROXY_RESPONSE_ITEM_TTL_MS`), 32 MiB of serialized owner/key/item payload and 16,384 distinct entries, evicted in least recently committed order. A successful stored response refreshes all retained history items; failed requests and `store:false` responses do not extend retention. These are payload bounds, not total process RSS.
 - Workers: existing caller session limit and independent idle TTL.
 - Completed/consumed entries may be evicted under pressure. Active pending entries are retained until expiry; exhausted capacity returns 429.
 - Owner identity includes Authorization, `X-Codex-Proxy-Client-Id`, and OpenAI `user`. Resend the same identity on continuation. Shared credentials require distinct client IDs for tenant isolation.
-- Restart, expiry or eviction makes response references invalid (`previous_response_not_found`); full explicit replay remains available. No prompt/output history is persisted to disk by the new response-reference cache. App-server itself may maintain temporary harness state, deleted during worker cleanup.
+- `previous_response_id` expires with full response history (`previous_response_not_found`); item references survive separately until their own expiry/eviction. A restart invalidates both caches. With multiple proxy replicas, route a conversation to the same instance; the cache is not shared. Full explicit replay remains available. No prompt/output history is persisted to disk by the new response-reference cache. App-server itself may maintain temporary harness state, deleted during worker cleanup.
 
 ## Streaming
 

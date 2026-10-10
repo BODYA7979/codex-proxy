@@ -86,12 +86,21 @@ test("n8n AI SDK 4.0.20 stored item replay and content-array results", { skip: !
       const next = await run(); assert.equal(next.content.filter(part => part.type === "tool-call").length, 1);
       assert.ok(requests[1].input.some((item: any) => item.type === "item_reference"));
       assert.ok(requests[1].input.some((item: any) => item.type === "function_call_output" && Array.isArray(item.output)));
-      addResults(next); const last = await run(); assert.match(last.content.filter(part => part.type === "text").map(part => part.text).join(""), /CLIENT_PART_ONE.*CLIENT_PART_TWO/);
+      addResults(next);
+      // Shorten only this completed response's history TTL to reproduce an idle
+      // chat without a ten-minute test. Item retention remains independently set.
+      const savedTtl = CONFIG.callerTtlMs;
+      let last: { content: any[] };
+      try { CONFIG.callerTtlMs = 20; last = await run(); }
+      finally { CONFIG.callerTtlMs = savedTtl; }
+      assert.match(last.content.filter(part => part.type === "text").map(part => part.text).join(""), /CLIENT_PART_ONE.*CLIENT_PART_TWO/);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      RESPONSE_STATE.sweep(); await CALLER_RUNTIME.drain();
       // Continue after the original turn has completed, replaying the entire
       // SDK-built history with references to both earlier response segments.
       prompt.push({ role: "assistant", content: last.content.filter(part => part.type === "text").map(part => ({ type: "text", text: part.text, providerOptions: part.providerMetadata })) });
       prompt.push({ role: "user", content: [{ type: "text", text: "Continue from the same history" }] });
-      const continued = await run(); assert.ok(continued.content.length); // new thread replays completed pairs
+      const continued = await run(); assert.ok(continued.content.length); // new thread replays after history/worker expiry
       const refs = requests.at(-1).input.filter((item: any) => item.type === "item_reference"); assert.ok(refs.length >= 3);
       received.push({ target: target.name, streaming, references: refs.length });
     });

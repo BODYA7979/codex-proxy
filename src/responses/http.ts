@@ -17,7 +17,8 @@ import { ResponseState, type PreparedResponse } from "./state.js";
 import { compileToolSchemas } from "../adapter/function-tools.js";
 import { normalizeInput, normalizeResponsesTools, responsesToChat, responseTools } from "./validation.js";
 
-export const RESPONSE_STATE = new ResponseState(() => ({ ttl: CONFIG.callerTtlMs, entries: CONFIG.callerMaxSessions * 8, bytes: 32 * 1024 * 1024, historyBytes: 1024 * 1024 }));
+export const RESPONSE_STATE = new ResponseState(() => ({ ttl: CONFIG.callerTtlMs, entries: CONFIG.callerMaxSessions * 8, bytes: 32 * 1024 * 1024, historyBytes: 1024 * 1024,
+  itemTtl: CONFIG.responseItemTtlMs, itemBytes: 32 * 1024 * 1024, itemEntries: 16_384 }));
 const sweep = setInterval(() => RESPONSE_STATE.sweep(), 30_000); sweep.unref();
 export type NativeResponseRunner = (body: ResponseRequest, signal: AbortSignal, delta?: (text: string) => void) => Promise<TurnResult>;
 

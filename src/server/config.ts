@@ -1,6 +1,7 @@
 export interface ProxyConfig {
   toolExecutionMode: "caller" | "hybrid";
   callerTtlMs: number;
+  responseItemTtlMs: number;
   callerMaxSessions: number;
   callerUpstream: string;
   host: string;
@@ -50,6 +51,7 @@ export function parseConfig(env: Env = process.env): ProxyConfig {
   return {
     toolExecutionMode,
     callerTtlMs: parsePositiveInt(env.CODEX_PROXY_CALLER_TTL_MS, 600_000),
+      responseItemTtlMs: parsePositiveInt(env.CODEX_PROXY_RESPONSE_ITEM_TTL_MS, 86_400_000),
     callerMaxSessions: parsePositiveInt(env.CODEX_PROXY_CALLER_MAX_SESSIONS, 32),
     callerUpstream: env.CODEX_PROXY_CALLER_UPSTREAM || "https://chatgpt.com/backend-api/codex/responses",
     host: env.CODEX_PROXY_HOST || "127.0.0.1",

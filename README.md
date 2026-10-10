@@ -21,7 +21,7 @@ This follows the same philosophy as [`claude-proxy`](https://github.com/mehdic/c
 
 ## Status
 
-v0.5.3 local proxy. Working locally with:
+v0.5.4 local proxy. Working locally with:
 
 - non-streaming and streaming `/v1/chat/completions`
 - improved `/v1/responses` compatibility for string input, message arrays, mixed content parts, function-call/function-call-output inputs, reasoning/summary/item-reference inputs, and SDK-friendly streaming event aliases
@@ -285,6 +285,7 @@ More detail: [docs/openclaw.md](docs/openclaw.md).
 | `CODEX_PROXY_PREWARM_MODELS` | `gpt-5.5,gpt-5.4-mini` | Comma-separated startup prewarm models |
 | `CODEX_PROXY_INIT_POOL` | enabled | Set `0` to disable startup prewarm |
 | `CODEX_PROXY_FALLBACK_ON_POOL_FAILURE` | enabled | Set `0` to disable pool-to-oneshot retry before response commit |
+| `CODEX_PROXY_RESPONSE_ITEM_TTL_MS` | `86400000` | Idle retention of owner-scoped Responses items, separate from live tool sessions (24 hours) |
 | `CODEX_PROXY_KEEPALIVE_MS` | `10000` | SSE comment keepalive interval; `0` disables |
 | `CODEX_PROXY_SESSIONS` | `0` | Legacy enable flag for `X-Codex-Proxy-Session` sticky thread reuse |
 | `CODEX_PROXY_SESSION_TTL_MS` | `600000` | Legacy idle opt-in session TTL fallback |
@@ -383,7 +384,7 @@ This composable design ensures OpenClaw-dispatched tools and Codex-native capabi
 
 The complete project plan lives in [`docs/OCTO_FEATURE_PLAN.md`](docs/OCTO_FEATURE_PLAN.md).
 
-Implemented through v0.5.3 plus the sticky-session implementation branch:
+Implemented through v0.5.4 plus the sticky-session implementation branch:
 
 - pooled/oneshot runtimes, opt-in sticky sessions, pricing/usage reporting, release checklist, LaunchAgent support, and local soak harness
 - configurable Codex sandbox/approval policy for trusted localhost deployments

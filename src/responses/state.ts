@@ -13,7 +13,11 @@ interface Entry {
   busy: boolean;
   expires: number;
   bytes: number;
-  itemKeys: string[];
+}
+interface ItemEntry { item: ResponseInputItem; expires: number; bytes: number }
+interface StateLimits {
+  ttl: number; entries: number; bytes: number; historyBytes: number;
+  itemTtl?: number; itemBytes?: number; itemEntries?: number;
 }
 export interface PreparedResponse {
   input: ResponseInputItem[];
@@ -30,16 +34,26 @@ export interface PreparedResponse {
 export class ResponseState {
   private readonly entries = new Map<string, Entry>();
   private readonly calls = new Map<string, Entry>();
-  private readonly items = new Map<string, { entry: Entry; item: ResponseInputItem }>();
+  // SDKs keep opaque item IDs across idle gaps and replay completed calls after
+  // workers expire. Store each owned item once, independently of response state.
+  private readonly items = new Map<string, ItemEntry>();
+  private itemBytes = 0;
   private bytes = 0;
-  constructor(private readonly limits: () => { ttl: number; entries: number; bytes: number; historyBytes: number }, private readonly now = Date.now) {}
+  constructor(private readonly limits: () => StateLimits, private readonly now = Date.now) {}
   private remove(id: string, entry: Entry): void {
     this.entries.delete(id); this.bytes -= entry.bytes;
-    for (const key of entry.itemKeys) if (this.items.get(key)?.entry === entry) this.items.delete(key);
     for (const call of entry.pending) if (this.calls.get(call) === entry) this.calls.delete(call);
   }
-  sweep(): void { for (const [id, entry] of this.entries) if (entry.expires <= this.now() && !entry.busy) this.remove(id, entry); }
-  clear(): void { this.entries.clear(); this.calls.clear(); this.items.clear(); this.bytes = 0; }
+  private removeItem(key: string): void {
+    const item = this.items.get(key);
+    if (item) { this.itemBytes -= item.bytes; this.items.delete(key); }
+  }
+  sweep(): void {
+    const now = this.now();
+    for (const [id, entry] of this.entries) if (entry.expires <= now && !entry.busy) this.remove(id, entry);
+    for (const [key, item] of this.items) if (item.expires <= now) this.removeItem(key);
+  }
+  clear(): void { this.entries.clear(); this.calls.clear(); this.items.clear(); this.bytes = 0; this.itemBytes = 0; }
 
   prepare(owner: string, body: ResponseRequest, incoming: ResponseInputItem[], model: string, suppliedTools: ChatCompletionTool[], mode?: string): PreparedResponse {
     this.sweep();
@@ -121,20 +135,28 @@ export class ResponseState {
         const bytes = historyBytes + Buffer.byteLength(JSON.stringify([tools, execution]));
         if (historyBytes > limit.historyBytes || bytes > limit.bytes) throw new CallerRequestError("Response history limit exceeded", 413, "response_history_too_large");
         if (body.store !== false) {
+          const retained = new Map<string, ItemEntry>();
+          for (const item of history) if ("id" in item && typeof item.id === "string") {
+            const key = JSON.stringify([owner, item.id]);
+            retained.set(key, { item: structuredClone(item), expires: this.now() + (limit.itemTtl ?? limit.ttl),
+              bytes: Buffer.byteLength(key) + Buffer.byteLength(JSON.stringify(item)) });
+          }
+          const retainedBytes = [...retained.values()].reduce((sum, item) => sum + item.bytes, 0);
+          const maxItemBytes = limit.itemBytes ?? limit.bytes, maxItems = limit.itemEntries ?? limit.entries * 8;
+          if (retainedBytes > maxItemBytes || retained.size > maxItems) throw new CallerRequestError("Response item state capacity reached", 429, "response_state_capacity");
           while (this.entries.size >= limit.entries || this.bytes + bytes > limit.bytes) {
             const victim = [...this.entries].find(([, entry]) => !entry.busy && (!entry.pending.length || entry.used));
             if (!victim) throw new CallerRequestError("Response state capacity reached", 429, "response_state_capacity");
             this.remove(...victim);
           }
           const entry: Entry = { owner, history: structuredClone(history), model: resolvedModel, tools: structuredClone(tools), execution: structuredClone(execution),
-            pending: output.filter(item => item.type === "function_call").map(item => item.call_id), used: false, busy: false, expires: this.now() + limit.ttl, bytes, itemKeys: [] };
+            pending: output.filter(item => item.type === "function_call").map(item => item.call_id), used: false, busy: false, expires: this.now() + limit.ttl, bytes };
           this.entries.set(id, entry); this.bytes += bytes;
-          // Index owned items from the entire retained lineage, so referenced
-          // context remains available while a conversation is actively replayed.
-          for (const item of entry.history) if ("id" in item && typeof item.id === "string") {
-            const key = JSON.stringify([owner, item.id]);
-            this.items.set(key, { entry, item }); entry.itemKeys.push(key);
-          }
+          // Refresh only after a successful stored response. Replayed ancestors
+          // share one cache entry and move to the end of the bounded LRU.
+          for (const key of retained.keys()) this.removeItem(key);
+          while (this.items.size + retained.size > maxItems || this.itemBytes + retainedBytes > maxItemBytes) this.removeItem(this.items.keys().next().value!);
+          for (const [key, item] of retained) { this.items.set(key, item); this.itemBytes += item.bytes; }
           for (const call of entry.pending) this.calls.set(call, entry);
         }
         if (pending) { pending.used = true; pending.busy = false; }

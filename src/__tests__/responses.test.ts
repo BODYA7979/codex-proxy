@@ -209,6 +209,57 @@ test("content-array tool outputs retain text order and reject unsupported media"
   assert.throws(() => responsesToChat(body, [functionCall(), { ...input[1], output: [{ type: "input_image", image_url: "https://example.com/image" }] }] as any), { code: "unsupported_tool_output" });
 });
 
+test("SDK item replay survives worker/history expiry and response-entry eviction", () => {
+  let now = 1;
+  const store = new ResponseState(() => ({ ttl: 100, itemTtl: 1000, entries: 1, bytes: 10000, historyBytes: 5000 }), () => now);
+  const message = { type: "message" as const, id: "msg_idle", status: "completed" as const, role: "assistant" as const, content: [{ type: "output_text" as const, text: "Original context survives the idle gap" }] };
+  store.prepare("owner", body, normalizeInput(body.input), "gpt-5.5", []).commit("resp_idle", [message, functionCall()]);
+  now = 102; store.sweep();
+  assert.throws(() => store.prepare("owner", { ...body, previous_response_id: "resp_idle" }, [], "gpt-5.5", []), { code: "previous_response_not_found" });
+  const replay = [{ type: "item_reference" as const, id: message.id }, { type: "item_reference" as const, id: "fc_call_1" }, output()];
+  const next = store.prepare("owner", body, replay, "gpt-5.5", []);
+  assert.equal(next.pending, undefined); assert.deepEqual(next.input, [message, functionCall(), output()]);
+  now = 200; next.commit("resp_replay", []);
+  // Unrelated responses evict full histories, without deleting retained items.
+  for (let i = 0; i < 3; i++) store.prepare("other", body, normalizeInput(body.input), "gpt-5.5", []).commit(`resp_other_${i}`, []);
+  now = 1050; store.sweep();
+  assert.deepEqual(store.prepare("owner", body, replay, "gpt-5.5", []).input[0], message);
+  assert.throws(() => store.prepare("foreign", body, replay, "gpt-5.5", []), { code: "item_reference_not_found" });
+  now = 1201; store.sweep();
+  assert.throws(() => store.prepare("owner", body, replay, "gpt-5.5", []), { code: "item_reference_not_found" });
+});
+
+test("item cache deduplicates replay, bounds bytes/count and refreshes LRU on commit", () => {
+  const limits = { ttl: 100, itemTtl: 1000, entries: 1, bytes: 10000, historyBytes: 5000, itemEntries: 2, itemBytes: 500 };
+  const store = new ResponseState(() => limits);
+  const message = (id: string, text = id) => ({ type: "message" as const, id, status: "completed" as const, role: "assistant" as const, content: [{ type: "output_text" as const, text }] });
+  const put = (id: string, items: any[] = []) => store.prepare("o", body, items, "m", []).commit(`resp_${id}`, [message(id)]);
+  const ref = (id: string) => [{ type: "item_reference" as const, id }];
+  put("a"); put("b");
+  for (let i = 0; i < 20; i++) store.prepare("o", body, ref("a"), "m", []).commit(`replay_${i}`, []);
+  put("c"); // a was refreshed, so b is the LRU victim.
+  assert.deepEqual(store.prepare("o", body, ref("a"), "m", []).input[0], message("a"));
+  assert.throws(() => store.prepare("o", body, ref("b"), "m", []), { code: "item_reference_not_found" });
+  limits.itemBytes = 220; put("d"); // Byte pressure is bounded independently of count.
+  assert.throws(() => store.prepare("o", body, ref("a"), "m", []), { code: "item_reference_not_found" });
+  assert.throws(() => store.prepare("o", body, [], "m", []).commit("oversize", [message("huge", "x".repeat(400))]), { code: "response_state_capacity" });
+  assert.doesNotThrow(() => store.prepare("o", body, ref("d"), "m", []));
+  store.clear(); assert.throws(() => store.prepare("o", body, ref("d"), "m", []), { code: "item_reference_not_found" });
+});
+
+test("store false does not retain or refresh item references", () => {
+  let now = 1;
+  const store = new ResponseState(() => ({ ttl: 100, itemTtl: 1000, entries: 3, bytes: 10000, historyBytes: 5000 }), () => now);
+  const message = { type: "message" as const, id: "msg_nostore", status: "completed" as const, role: "assistant" as const, content: [{ type: "output_text" as const, text: "Private response" }] };
+  store.prepare("o", { ...body, store: false }, [], "m", []).commit("nostore", [message]);
+  const ref = [{ type: "item_reference" as const, id: message.id }];
+  assert.throws(() => store.prepare("o", body, ref, "m", []), { code: "item_reference_not_found" });
+  store.prepare("o", body, [], "m", []).commit("stored", [message]);
+  now = 900; store.prepare("o", { ...body, store: false }, ref, "m", []).commit("notrefreshed", []);
+  now = 1002; store.sweep();
+  assert.throws(() => store.prepare("o", body, ref, "m", []), { code: "item_reference_not_found" });
+});
+
 test("replayed calls compare JSON values while protecting actual arguments", () => {
   const catalog = normalizeResponsesTools(body); const store = state();
   const original = { ...functionCall(), arguments: '{ "city": "Kyiv", "option": 1 }' };
