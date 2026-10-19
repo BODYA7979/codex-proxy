@@ -8,6 +8,8 @@ test("parseConfig applies safe defaults", () => {
   assert.equal(cfg.port, 3466);
   assert.equal(cfg.responseItemTtlMs, 86_400_000);
   assert.equal(cfg.defaultTimeoutMs, 120_000);
+  assert.equal(cfg.modelRefreshIntervalMs, 300_000);
+  assert.equal(cfg.modelRefreshRetryMs, 30_000);
   assert.equal(cfg.shutdownGraceMs, 10_000);
   assert.equal(cfg.runtime, "pool");
   assert.equal(cfg.allowRuntimeOverride, false);
@@ -32,6 +34,8 @@ test("parseConfig reads env overrides and clamps invalid numbers", () => {
     CODEX_PROXY_RESPONSE_ITEM_TTL_MS: "172800000",
     CODEX_PROXY_PORT: "3470",
     CODEX_PROXY_TIMEOUT_MS: "90000",
+    CODEX_PROXY_MODEL_REFRESH_INTERVAL_MS: "600000",
+    CODEX_PROXY_MODEL_REFRESH_RETRY_MS: "15000",
     CODEX_PROXY_TURN_START_TIMEOUT_MS: "bad",
     CODEX_PROXY_SHUTDOWN_GRACE_MS: "-1",
     CODEX_PROXY_RUNTIME: "oneshot",
@@ -55,6 +59,8 @@ test("parseConfig reads env overrides and clamps invalid numbers", () => {
   assert.equal(cfg.responseItemTtlMs, 172_800_000);
   assert.equal(cfg.port, 3470);
   assert.equal(cfg.defaultTimeoutMs, 90_000);
+  assert.equal(cfg.modelRefreshIntervalMs, 600_000);
+  assert.equal(cfg.modelRefreshRetryMs, 15_000);
   assert.equal(cfg.turnStartTimeoutMs, 10_000);
   assert.equal(cfg.shutdownGraceMs, 10_000);
   assert.equal(cfg.runtime, "oneshot");
@@ -78,10 +84,14 @@ test("parseConfig falls back for invalid Codex sandbox and approval values", () 
   const cfg = parseConfig({
     CODEX_PROXY_SANDBOX: "root-mode",
     CODEX_PROXY_RESPONSE_ITEM_TTL_MS: "0",
+    CODEX_PROXY_MODEL_REFRESH_INTERVAL_MS: "0",
+    CODEX_PROXY_MODEL_REFRESH_RETRY_MS: "bad",
     CODEX_PROXY_APPROVAL_POLICY: "always-yes",
   });
 
   assert.equal(cfg.codexSandbox, "read-only");
   assert.equal(cfg.responseItemTtlMs, 86_400_000);
+  assert.equal(cfg.modelRefreshIntervalMs, 300_000);
+  assert.equal(cfg.modelRefreshRetryMs, 30_000);
   assert.equal(cfg.codexApprovalPolicy, "never");
 });

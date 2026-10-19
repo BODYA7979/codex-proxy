@@ -224,7 +224,9 @@ If Codex does not report usage, the proxy falls back to a conservative local tok
 ## Models
 
 The proxy passes model names to Codex app-server. Current default is `gpt-5.5`.
-At startup it requests every page of the app-server `model/list` catalog for `/models` and `/v1/models`. If discovery fails or returns no models, the built-in list below remains available. Restart the proxy after logging in if it was started before authentication. The catalog is a model picker, not proof that the signed-in account can run every listed model.
+At startup it requests every page of the app-server `model/list` catalog for `/models` and `/v1/models`, then refreshes the catalog in the background every 5 minutes. Failed or empty refreshes retain the last successful catalog (or the built-in fallback before the first success) and retry after 30 seconds. Refreshes never overlap and stop with the HTTP server. Logging in after startup is picked up on a subsequent refresh without restarting the proxy.
+
+Discovery errors are always written to stderr as `models.refresh.error` or `models.refresh.empty`, including the failed stage (`initialize` or `model/list`), even when debug and trace are disabled. The catalog is a model picker, not proof that the signed-in account can run every listed model.
 
 Built-in fallback models:
 
@@ -278,6 +280,8 @@ More detail: [docs/openclaw.md](docs/openclaw.md).
 | `CODEX_PROXY_HOST` | `127.0.0.1` | HTTP bind host. Keep localhost unless you really know what you are doing. |
 | `CODEX_PROXY_MAX_BODY` | `8mb` | JSON body limit |
 | `CODEX_PROXY_DEFAULT_MODEL` | `gpt-5.5` | Default model when client omits one |
+| `CODEX_PROXY_MODEL_REFRESH_INTERVAL_MS` | `300000` | Delay after a successful model catalog refresh |
+| `CODEX_PROXY_MODEL_REFRESH_RETRY_MS` | `30000` | Retry delay after a failed or empty model catalog refresh |
 | `CODEX_PROXY_RUNTIME` | `pool` | `pool` or `oneshot` app-server runtime |
 | `CODEX_PROXY_ALLOW_RUNTIME_OVERRIDE` | unset | Set `1` to honor `X-Codex-Proxy-Runtime` |
 | `CODEX_PROXY_POOL_MAX` | `32` | Maximum live pooled app-server workers |

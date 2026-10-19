@@ -8,6 +8,8 @@ export interface ProxyConfig {
   port: number;
   maxBodySize: string;
   defaultModel: string;
+  modelRefreshIntervalMs: number;
+  modelRefreshRetryMs: number;
   runtime: "pool" | "oneshot";
   allowRuntimeOverride: boolean;
   codexBin: string;
@@ -58,6 +60,8 @@ export function parseConfig(env: Env = process.env): ProxyConfig {
     port: parsePort(env.CODEX_PROXY_PORT, 3466),
     maxBodySize: env.CODEX_PROXY_MAX_BODY || "8mb",
     defaultModel: env.CODEX_PROXY_DEFAULT_MODEL || "gpt-5.5",
+    modelRefreshIntervalMs: parsePositiveInt(env.CODEX_PROXY_MODEL_REFRESH_INTERVAL_MS, 300_000),
+    modelRefreshRetryMs: parsePositiveInt(env.CODEX_PROXY_MODEL_REFRESH_RETRY_MS, 30_000),
     runtime: parseRuntime(env.CODEX_PROXY_RUNTIME, "pool"),
     allowRuntimeOverride: env.CODEX_PROXY_ALLOW_RUNTIME_OVERRIDE === "1",
     codexBin: env.CODEX_PROXY_CODEX_BIN || "codex",

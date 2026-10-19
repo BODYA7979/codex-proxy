@@ -13,6 +13,15 @@ export function traceEnabled(): boolean {
 
 export function trace(event: string, data?: unknown): void {
   if (!traceEnabled()) return;
+  writeLog("trace", event, data);
+}
+
+/** Operational errors remain visible without enabling verbose request tracing. */
+export function logError(event: string, err: unknown, data?: unknown): void {
+  writeLog("error", event, { ...asObject(data), error: errorPayload(err) });
+}
+
+function writeLog(level: "trace" | "error", event: string, data?: unknown): void {
   const payload = {
     ts: new Date().toISOString(),
     pid: process.pid,
@@ -20,7 +29,7 @@ export function trace(event: string, data?: unknown): void {
     data: sanitize(data),
   };
   try {
-    process.stderr.write(`[codex-proxy:trace] ${JSON.stringify(payload)}\n`);
+    process.stderr.write(`[codex-proxy:${level}] ${JSON.stringify(payload)}\n`);
   } catch (err) {
     process.stderr.write(`[codex-proxy:trace] {"event":"trace_write_failed","error":${JSON.stringify(String(err))}}\n`);
   }
