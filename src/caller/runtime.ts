@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Request } from "express";
 import { CodexSubprocess, type TurnResult, type CodexSubprocessOptions } from "../subprocess/manager.js";
-import type { ChatCompletionRequest, ChatCompletionToolCall, ChatCompletionTool, ResponseOutputItem } from "../types/openai.js";
+import type { ChatCompletionRequest, ChatCompletionToolCall, ChatCompletionTool, ResponseOutputItem, ResponseRequest } from "../types/openai.js";
 import { chatMessagesToPrompt } from "../adapter/openai-to-codex.js";
 import { CONFIG } from "../server/config.js";
 import { CodexProxyError, mapErrorToHttp } from "../server/errors.js";
@@ -16,6 +16,7 @@ import { CALLER_PERMISSION_INSTRUCTIONS } from "./policy.js";
 import { CallerInference, CallerInferenceError, type ModelToolCall } from "./inference.js";
 
 export type CallerResult = TurnResult & { toolCalls?: ChatCompletionToolCall[]; outputItems?: ResponseOutputItem[] };
+type ResponseOptions = Pick<ResponseRequest, "service_tier" | "text">;
 
 import { CallerRequestError } from "./errors.js";
 export { CallerRequestError } from "./errors.js";
@@ -86,7 +87,7 @@ class CallerSession {
   private wake?: () => void;
   private ready = false;
   private cleanupStarted = false;
-  constructor(readonly owner: string, readonly model: string, readonly tools: ChatCompletionTool[], private readonly forget: () => void, private readonly trackCleanup: (cleanup: Promise<void>) => void, readonly nativeTools = false, readonly responses = false) {
+  constructor(readonly owner: string, readonly model: string, readonly tools: ChatCompletionTool[], private readonly forget: () => void, private readonly trackCleanup: (cleanup: Promise<void>) => void, readonly nativeTools = false, readonly responses = false, readonly responseOptions?: ResponseOptions) {
     this.inference = new CallerInference(tools, CONFIG.callerUpstream, calls => this.capture(calls), error => this.fail(error), nativeTools, responses);
   }
 
@@ -135,12 +136,14 @@ class CallerSession {
     const options: CodexSubprocessOptions = {
       model: this.model, cwd: this.directory, instructions,
       reasoningEffort: body.reasoning_effort || undefined,
+      serviceTier: this.responseOptions?.service_tier && this.responseOptions.service_tier !== "auto" ? this.responseOptions.service_tier : undefined,
       timeoutMs: CONFIG.defaultTimeoutMs, initTimeoutMs: CONFIG.initTimeoutMs, turnStartTimeoutMs: CONFIG.turnStartTimeoutMs,
       // Codex treats outputSchema as strict Structured Outputs, not JSON mode.
       // Arbitrary JSON objects use instructions plus final-answer validation.
       outputSchema: body.response_format?.type === "json_schema" ? body.response_format.json_schema.schema : undefined,
       envOverrides: { CODEX_HOME: this.directory },
       configOverrides: {
+        ...(this.responseOptions?.text?.verbosity ? { model_verbosity: JSON.stringify(this.responseOptions.text.verbosity) } : {}),
         model_provider: '"caller"',
         // Harness compaction uses OpenAI provider identity. The localhost base
         // URL still enforces caller-only execution before any output reaches it.
@@ -266,7 +269,7 @@ export class CallerRuntime {
     return this.versionCheck;
   }
 
-  async run(req: Request, signal: AbortSignal, options: { body?: ChatCompletionRequest; replay?: boolean; nativeTools?: boolean; responses?: boolean } = {}): Promise<CallerResult> {
+  async run(req: Request, signal: AbortSignal, options: { body?: ChatCompletionRequest; replay?: boolean; nativeTools?: boolean; responses?: boolean; responseOptions?: ResponseOptions } = {}): Promise<CallerResult> {
     const body = options.body || req.body as ChatCompletionRequest;
     validateCallerRequest(body);
     for (const [id, receipt] of this.failures) if (receipt.expiresAt <= Date.now()) this.failures.delete(id);
@@ -317,7 +320,7 @@ export class CallerRuntime {
         void cleanup.finally(() => this.cleanups.delete(cleanup)).catch(() => {
           if (CONFIG.debug || CONFIG.trace) console.error(JSON.stringify({ event: "caller.cleanup_failed", mode: "caller" }));
         });
-      }, !!options.nativeTools, !!options.responses);
+      }, !!options.nativeTools, !!options.responses, options.responses ? options.responseOptions : undefined);
       this.sessions.add(session);
     }
     const abort = () => session.close();

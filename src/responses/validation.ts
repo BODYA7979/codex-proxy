@@ -3,6 +3,7 @@ import { CallerRequestError, validateCallerRequest } from "../caller/runtime.js"
 
 export { compileToolSchemas } from "../adapter/function-tools.js";
 import { compileToolSchemas, functionOutputText } from "../adapter/function-tools.js";
+import { normalizeResponsesRequest } from "./options.js";
 
 export function normalizeResponsesTools(body: ResponseRequest): ChatCompletionTool[] {
   if (body.tools !== undefined && !Array.isArray(body.tools)) throw new CallerRequestError("tools must be an array");
@@ -14,7 +15,7 @@ export function normalizeResponsesTools(body: ResponseRequest): ChatCompletionTo
     if (!fn || typeof fn !== "object" || (fn.strict !== undefined && fn.strict !== null && typeof fn.strict !== "boolean")
         || (fn.description !== undefined && typeof fn.description !== "string")) throw new CallerRequestError("Invalid function definition");
     const { name, description, parameters, strict } = fn;
-    return { type: "function", function: { name, ...(description === undefined ? {} : { description }), ...(parameters === undefined ? {} : { parameters }), ...(strict == null ? {} : { strict }) } };
+    return { type: "function", function: { name, ...(description === undefined ? {} : { description }), ...(parameters == null ? {} : { parameters }), ...(strict == null ? {} : { strict }) } };
   });
 }
 
@@ -24,7 +25,7 @@ export function responseTools(tools: ChatCompletionTool[]): ResponseFunctionTool
 
 export function normalizeTextFormat(body: ResponseRequest): ResponseFormat | undefined {
   if (body.text !== undefined && (!body.text || typeof body.text !== "object" || Array.isArray(body.text))) throw new CallerRequestError("text must be an object");
-  if (body.text && Object.keys(body.text).some(key => key !== "format")) throw new CallerRequestError("Only text.format is supported", 400, "unsupported_parameter");
+  if (body.text && Object.keys(body.text).some(key => key !== "format" && key !== "verbosity")) throw new CallerRequestError("Only text.format and text.verbosity are supported", 400, "unsupported_parameter");
   const format = body.text?.format;
   if (format && body.response_format) throw new CallerRequestError("Use either text.format or response_format");
   if (format !== undefined && (!format || typeof format !== "object" || Array.isArray(format))) throw new CallerRequestError("text.format must be an object");
@@ -53,7 +54,8 @@ export function normalizeInput(input: ResponseRequest["input"]): ResponseInputIt
   return input;
 }
 
-export function responsesToChat(body: ResponseRequest, input: ResponseInputItem[], tools = normalizeResponsesTools(body)): ChatCompletionRequest {
+export function responsesToChat(request: ResponseRequest, input: ResponseInputItem[], tools = normalizeResponsesTools(request)): ChatCompletionRequest {
+  const body = normalizeResponsesRequest(request);
   if (body.model !== undefined && (typeof body.model !== "string" || !body.model)) throw new CallerRequestError("model must be a non-empty string");
   for (const key of ["stream", "store", "parallel_tool_calls"] as const) if (body[key] !== undefined && typeof body[key] !== "boolean") throw new CallerRequestError(`${key} must be a boolean`);
   if (body.instructions !== undefined && typeof body.instructions !== "string") throw new CallerRequestError("instructions must be a string");
@@ -62,6 +64,9 @@ export function responsesToChat(body: ResponseRequest, input: ResponseInputItem[
   if (body.reasoning?.effort != null && typeof body.reasoning.effort !== "string") throw new CallerRequestError("reasoning.effort must be a string");
   if (body.reasoning && Object.entries(body.reasoning).some(([key, value]) => key !== "effort" && value != null)) throw new CallerRequestError("Only reasoning.effort is supported", 400, "unsupported_parameter");
   if (body.user !== undefined && typeof body.user !== "string") throw new CallerRequestError("user must be a string");
+  // Advisory OpenAI identifiers have no app-server equivalent. Accept them
+  // without adding them to the prompt or changing continuation ownership.
+  for (const key of ["prompt_cache_key", "safety_identifier"] as const) if (body[key] != null && typeof body[key] !== "string") throw new CallerRequestError(`${key} must be a string or null`);
   if (body.metadata != null && (typeof body.metadata !== "object" || Array.isArray(body.metadata) || Object.values(body.metadata).some(value => typeof value !== "string"))) throw new CallerRequestError("metadata must be an object of strings");
   const messages: ChatMessage[] = [];
   if (body.instructions) messages.push({ role: "system", content: body.instructions });

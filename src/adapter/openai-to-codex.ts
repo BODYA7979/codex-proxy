@@ -144,7 +144,7 @@ export function responsesRequestToOptions(
   }
 
   const toolOptions = {
-    tools: req.tools?.map(tool => "function" in tool ? tool : { type: "function" as const, function: { ...tool, strict: tool.strict ?? undefined } }),
+    tools: req.tools?.map(tool => "function" in tool ? tool : { type: "function" as const, function: { ...tool, parameters: tool.parameters ?? undefined, strict: tool.strict ?? undefined } }),
     tool_choice: typeof req.tool_choice === "object" && "name" in req.tool_choice
       ? { type: "function" as const, function: { name: req.tool_choice.name } } : req.tool_choice,
     response_format: req.response_format,
@@ -155,12 +155,13 @@ export function responsesRequestToOptions(
     options: {
       model,
       reasoningEffort: req.reasoning?.effort ?? defaults?.reasoningEffort,
+      serviceTier: req.service_tier && req.service_tier !== "auto" ? req.service_tier : defaults?.serviceTier,
       instructions: req.instructions || defaults?.instructions,
       timeoutMs: defaults?.timeoutMs,
       initTimeoutMs: defaults?.initTimeoutMs,
       turnStartTimeoutMs: defaults?.turnStartTimeoutMs,
       cwd: defaults?.cwd,
-      configOverrides: defaults?.configOverrides,
+      configOverrides: req.text?.verbosity ? { ...defaults?.configOverrides, model_verbosity: JSON.stringify(req.text.verbosity) } : defaults?.configOverrides,
     },
   };
 }

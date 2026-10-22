@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import type { ResponseRequest, ResponseObject, ResponseOutputItem } from "../types/openai.js";
 import type { TurnResult } from "../subprocess/manager.js";
@@ -16,6 +16,7 @@ import { recordRequest, incCounter } from "../server/metrics.js";
 import { ResponseState, type PreparedResponse } from "./state.js";
 import { compileToolSchemas } from "../adapter/function-tools.js";
 import { normalizeInput, normalizeResponsesTools, responsesToChat, responseTools } from "./validation.js";
+import { normalizeResponsesRequest } from "./options.js";
 
 export const RESPONSE_STATE = new ResponseState(() => ({ ttl: CONFIG.callerTtlMs, entries: CONFIG.callerMaxSessions * 8, bytes: 32 * 1024 * 1024, historyBytes: 1024 * 1024,
   itemTtl: CONFIG.responseItemTtlMs, itemBytes: 32 * 1024 * 1024, itemEntries: 16_384 }));
@@ -43,7 +44,7 @@ export function emitResponseItem(item: ResponseOutputItem, index: number, emit: 
 }
 
 export async function handleResponsesRequest(req: Request, res: Response, native: NativeResponseRunner): Promise<void> {
-  const body = req.body as ResponseRequest;
+  let body = req.body as ResponseRequest;
   const mode = callerMode(body);
   const requestId = String(res.locals.requestId || randomUUID());
   // Request IDs are caller supplied and may repeat. Response IDs must not.
@@ -63,28 +64,32 @@ export async function handleResponsesRequest(req: Request, res: Response, native
     if (CONFIG.debug || CONFIG.trace) console.error(JSON.stringify({ event, requestId, endpoint: "responses", responseId, model, mode, stage, availableToolCount: available, ...extra }));
   };
   const emit = (type: string, data: Record<string, unknown>) => {
-    if (!res.destroyed && !res.writableEnded) res.write(makeResponseStreamEvent(type, { ...data, sequence_number: sequence++ }));
+    const payload: Record<string, unknown> = { ...data, sequence_number: sequence++ };
+    if (body.stream_options?.include_obfuscation && type.endsWith(".delta")) {
+      // Pad serialized delta payloads to 256-byte boundaries with random ASCII.
+      const bytes = Buffer.byteLength(JSON.stringify({ type, ...payload, obfuscation: "" }));
+      const length = (256 - bytes % 256) % 256;
+      payload.obfuscation = randomBytes(length).toString("base64").slice(0, length);
+    }
+    if (!res.destroyed && !res.writableEnded) res.write(makeResponseStreamEvent(type, payload));
   };
   try {
     if (mode === "invalid") throw new CallerRequestError("tool_execution_mode must be caller or hybrid", 400, "unsupported_tool_execution_mode");
-    // Explicit unsupported features never masquerade as successful responses.
-    const raw = body as unknown as Record<string, unknown>;
-    const supported = new Set(["model", "input", "stream", "reasoning", "instructions", "temperature", "top_p", "max_output_tokens", "user", "tools", "tool_choice", "parallel_tool_calls", "text", "store", "response_format", "previous_response_id", "metadata", "codex_proxy", "tool_execution_mode", "background", "conversation", "include", "truncation"]);
-    for (const key of Object.keys(raw)) if (!supported.has(key)) throw new CallerRequestError(`Unsupported Responses option: ${key}`, 400, "unsupported_parameter");
-    for (const key of ["background", "conversation", "include", "truncation"]) if (raw[key] !== undefined && raw[key] !== false && raw[key] !== null && !(key === "include" && Array.isArray(raw[key]) && !raw[key].length) && !(key === "truncation" && raw[key] === "disabled")) throw new CallerRequestError(`Unsupported Responses option: ${key}`, 400, "unsupported_parameter");
+    body = normalizeResponsesRequest(body);
     stage = "tool_normalization";
     const tools = normalizeResponsesTools(body);
     const incoming = normalizeInput(body.input);
     stage = "session_continuation";
     prepared = RESPONSE_STATE.prepare(callerIdentity(req), body, incoming, model, tools, mode);
     model = prepared.model; available = prepared.tools.length;
+    const { mode: _executionMode, ...execution } = prepared.execution;
     stage = "request_parsing";
-    const chat = responsesToChat({ ...body, ...prepared.execution, model }, prepared.input, prepared.tools);
+    const chat = responsesToChat({ ...body, ...execution, model }, prepared.input, prepared.tools);
     const bridge = mode === "caller" || !!prepared.tools.length || !!prepared.pending;
     const session = resolveSessionOptions(req, CONFIG);
     if (session.kind === "invalid") throw new CallerRequestError(session.message);
     if (bridge && session.options.mode === "sticky") throw new CallerRequestError("External tool continuation uses call_id/previous_response_id; sticky workers are unsupported");
-    const effective: ResponseRequest = { ...body, input: prepared.input, model, tools: [], tool_choice: "none", response_format: chat.response_format, text: undefined };
+    const effective: ResponseRequest = { ...body, ...execution, input: prepared.input, model, tools: [], tool_choice: "none", response_format: chat.response_format, text: execution.text?.verbosity ? { verbosity: execution.text.verbosity } : undefined };
     res.setHeader("X-Codex-Proxy-Tool-Execution-Mode", mode);
     initial = {
       id: responseId, object: "response", created_at: Math.floor(Date.now() / 1000), status: "in_progress", model, output: [], error: null, incomplete_details: null,
@@ -92,7 +97,7 @@ export async function handleResponsesRequest(req: Request, res: Response, native
       tools: responseTools(prepared.tools), tool_choice: body.tool_choice || "auto", parallel_tool_calls: body.parallel_tool_calls !== false,
       text: { format: chat.response_format?.type === "json_schema"
         ? { type: "json_schema", name: chat.response_format.json_schema.name || "answer", schema: chat.response_format.json_schema.schema || {}, strict: chat.response_format.json_schema.strict }
-        : { type: chat.response_format?.type || "text" } }, reasoning: prepared.execution.reasoning ?? null, usage: null, store: body.store !== false,
+        : { type: chat.response_format?.type || "text" }, ...(prepared.execution.text?.verbosity ? { verbosity: prepared.execution.text.verbosity } : {}) }, reasoning: prepared.execution.reasoning ?? null, usage: null, store: body.store !== false,
       temperature: body.temperature ?? null, top_p: body.top_p ?? null, max_output_tokens: body.max_output_tokens ?? null,
     };
     diagnostic("responses.request");
@@ -112,7 +117,7 @@ export async function handleResponsesRequest(req: Request, res: Response, native
     } : undefined;
     stage = "codex_execution";
     const result: CallerResult = bridge
-      ? await CALLER_RUNTIME.run(req, controller.signal, { body: chat, replay: !prepared.pending, nativeTools: mode === "hybrid", responses: true })
+      ? await CALLER_RUNTIME.run(req, controller.signal, { body: chat, replay: !prepared.pending, nativeTools: mode === "hybrid", responses: true, responseOptions: prepared.execution })
       : await native(effective, controller.signal, onDelta);
     if (!bridge && chat.response_format && chat.response_format.type !== "text") {
       let value: unknown;

@@ -116,6 +116,18 @@ test("Responses SDK full cycles through installed app-server", { skip: !enabled,
       const json = await client.responses.create({ model: "gpt-5.5", input: "CASE:TEXT", text: { format: { type: "json_object" } } }); assert.deepEqual(JSON.parse(json.output_text), { answer: "Hello" });
       const text = await consume(await client.responses.create({ model: "gpt-5.5", instructions: "Concise", input: [{ role: "user", content: "CASE:TEXT" }, { role: "user", content: "Hi" }], stream: true })); assert.match(text.output_text, /Hello/);
     });
+    await t.test("SDK nulls, verbosity and service tier reach real app-server inference and survive tool continuation", async () => {
+      for (const mode of ["caller", "hybrid"]) {
+        const first = await client.responses.create({ model: "gpt-5.5", tools, input: "CASE:SDK_OPTIONS", instructions: null, parallel_tool_calls: null, store: null,
+          service_tier: "priority", text: { verbosity: "low" }, stream: true, stream_options: { include_obfuscation: false }, ...{ tool_execution_mode: mode } });
+        const response = await consume(first);
+        assert.equal(outputs(response).length, 1);
+        assert.equal(received.at(-1).service_tier, "priority"); assert.equal(received.at(-1).text.verbosity, "low");
+        const final = await client.responses.create({ model: "gpt-5.5", previous_response_id: response.id, input: outputs(response), service_tier: null, text: { verbosity: null }, ...{ tool_execution_mode: mode } });
+        assert.match(final.output_text, /CLIENT:/);
+        assert.equal(received.at(-1).service_tier, "priority"); assert.equal(received.at(-1).text.verbosity, "low");
+      }
+    });
     await t.test("interleaved messages and calls preserve order without repeated text", async () => {
       const response = await client.responses.create({ model: "gpt-5.5", tools, input: "CASE:ORDER" });
       assert.deepEqual(response.output.map(item => item.type), ["function_call", "message", "function_call"]);

@@ -57,6 +57,8 @@ export interface CodexSubprocessOptions {
   turnStartTimeoutMs?: number;
   /** Per-turn reasoning effort override */
   reasoningEffort?: string;
+  /** Per-turn service tier override; omission preserves Codex configuration. */
+  serviceTier?: string;
   /** System / developer instructions */
   instructions?: string;
   /** Additional config overrides passed as `-c key=value` */
@@ -399,6 +401,7 @@ export class CodexSubprocess {
         input,
         model: options.model,
         effort: options.reasoningEffort,
+        ...(options.serviceTier ? { serviceTierForTurn: options.serviceTier } : {}),
         ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
       }, options.turnStartTimeoutMs || CONFIG.turnStartTimeoutMs);
       this.log("subprocess.turn_start.result", { instanceId: this.instanceId, threadId, turnStartResult });

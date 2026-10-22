@@ -185,6 +185,54 @@ test("official SDK HTTP integration covers mixed parallel items, previous_respon
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); RESPONSE_STATE.clear(); }
 });
 
+test("Responses accepts advisory identifiers for JSON and SSE in native, caller and hybrid tool paths", async t => {
+  let nativeRuns = 0, toolRuns = 0;
+  t.mock.method(CALLER_RUNTIME, "run", async (_req: unknown, _signal: unknown, options: { body: ChatCompletionRequest }) => {
+    toolRuns++;
+    assert.doesNotMatch(JSON.stringify(options.body), /cache-fixture|safety-fixture/);
+    return result();
+  });
+  const app = express(); app.use(express.json());
+  app.post(["/responses", "/v1/responses"], (req, res) => void handleResponsesRequest(req, res, async () => { nativeRuns++; return result(); }));
+  const server = createServer(app); server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const baseURL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const post = (path: string, request: object) => fetch(`${baseURL}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+  try {
+    for (const path of ["/responses", "/v1/responses"]) {
+      for (const execution of [{ tool_execution_mode: "hybrid" }, { tool_execution_mode: "caller", tools }, { tool_execution_mode: "hybrid", tools }]) {
+        for (const stream of [false, true]) {
+          for (const identifiers of [
+            { prompt_cache_key: "cache-fixture_PRIMARY", safety_identifier: "safety-fixture" },
+            { prompt_cache_key: "cache-fixture_PRIMARY", safety_identifier: "" },
+            { prompt_cache_key: null, safety_identifier: null },
+          ]) {
+            const response = await post(path, { model: "gpt-6.1-sol", input: "Hi", store: false, parallel_tool_calls: true, ...execution, stream, ...identifiers });
+            assert.equal(response.status, 200, await response.clone().text());
+            if (stream) {
+              const events = (await response.text()).split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
+              assert.equal(events.at(-1).type, "response.completed");
+              assert.equal(events.at(-1).response.output_text, "Done");
+            } else assert.equal((await response.json() as { output_text: string }).output_text, "Done");
+          }
+        }
+      }
+    }
+    assert.equal(nativeRuns, 12); assert.equal(toolRuns, 24);
+    for (const key of ["prompt_cache_key", "safety_identifier"]) {
+      for (const value of [42, false, {}, []]) {
+        const response = await post("/v1/responses", { input: "Hi", tool_execution_mode: "hybrid", [key]: value });
+        assert.equal(response.status, 400);
+        assert.equal((await response.json() as { error: { message: string } }).error.message, `${key} must be a string or null`);
+      }
+    }
+    for (const unsupported of [{ unknown_option: true }, { background: true }]) {
+      const response = await post("/v1/responses", { input: "Hi", tool_execution_mode: "hybrid", ...unsupported });
+      assert.equal(response.status, 400); assert.equal((await response.json() as { error: { code: string } }).error.code, "unsupported_parameter");
+    }
+    assert.equal(nativeRuns, 12); assert.equal(toolRuns, 24);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); RESPONSE_STATE.clear(); }
+});
+
 test("item references resolve owner-scoped message/function items and preserve active lineage", () => {
   let now = 1; const store = state(() => now); const catalog = normalizeResponsesTools(body);
   const message = { type: "message" as const, id: "msg_source", role: "assistant" as const, status: "completed" as const, content: [{ type: "output_text" as const, text: "Original assistant context" }] };

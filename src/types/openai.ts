@@ -174,21 +174,28 @@ export interface ResponseRequest {
   tool_execution_mode?: "caller" | "hybrid";
   model?: string;
   input: string | ResponseInputItem[];
-  stream?: boolean;
+  stream?: boolean | null;
   reasoning?: { effort?: string | null } | null;
-  instructions?: string;
-  temperature?: number;
-  top_p?: number;
-  max_output_tokens?: number;
-  user?: string;
+  instructions?: string | null;
+  temperature?: number | null;
+  top_p?: number | null;
+  max_output_tokens?: number | null;
+  user?: string | null;
+  /** Accepted for compatibility; Codex manages caching and upstream identity. */
+  prompt_cache_key?: string | null;
+  safety_identifier?: string | null;
+  prompt_cache_retention?: "in_memory" | "24h" | null;
+  prompt_cache_options?: { mode?: "implicit" | "explicit"; ttl?: "30m"; prewarm?: boolean; comparison_response_id?: string | null };
+  service_tier?: "auto" | "default" | "flex" | "priority" | "fast" | "scale" | "ultrafast" | null;
+  stream_options?: { include_obfuscation?: boolean } | null;
   tools?: (ResponseFunctionTool | ChatCompletionTool)[];
   tool_choice?: "none" | "auto" | "required" | { type: "function"; name: string } | ChatCompletionNamedToolChoice;
-  parallel_tool_calls?: boolean;
-  text?: { format?: ResponseTextFormat };
-  store?: boolean;
+  parallel_tool_calls?: boolean | null;
+  text?: { format?: ResponseTextFormat; verbosity?: "low" | "medium" | "high" | null };
+  store?: boolean | null;
   response_format?: ResponseFormat;
   /** Owner-isolated, bounded in-memory conversation reference. */
-  previous_response_id?: string;
+  previous_response_id?: string | null;
   /** Optional: arbitrary key-value metadata echoed back in the response. */
   metadata?: Record<string, string> | null;
   codex_proxy?: CodexProxyRequestExtension;
@@ -198,13 +205,13 @@ export interface ResponseFunctionTool {
   type: "function";
   name: string;
   description?: string;
-  parameters?: Record<string, unknown>;
+  parameters?: Record<string, unknown> | null;
   strict?: boolean | null;
 }
 
 export type ResponseTextFormat =
   | { type: "text" | "json_object" }
-  | { type: "json_schema"; name: string; schema: Record<string, unknown>; strict?: boolean };
+  | { type: "json_schema"; name: string; schema: Record<string, unknown>; strict?: boolean | null };
 
 export type ResponseInputItem =
   | ResponseInputMessage
@@ -284,7 +291,7 @@ export interface ResponseObject {
   tools?: ResponseFunctionTool[];
   tool_choice?: ResponseRequest["tool_choice"];
   parallel_tool_calls?: boolean;
-  text?: { format: ResponseTextFormat };
+  text?: { format: ResponseTextFormat; verbosity?: "low" | "medium" | "high" | null };
   store?: boolean;
   reasoning?: ResponseRequest["reasoning"];
   incomplete_details?: null;

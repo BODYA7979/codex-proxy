@@ -7,7 +7,7 @@ interface Entry {
   history: ResponseInputItem[];
   model: string;
   tools: ChatCompletionTool[];
-  execution: Pick<ResponseRequest, "reasoning" | "text" | "response_format"> & { mode?: string };
+  execution: Pick<ResponseRequest, "reasoning" | "text" | "response_format" | "service_tier"> & { mode?: string };
   pending: string[];
   used: boolean;
   busy: boolean;
@@ -116,8 +116,9 @@ export class ResponseState {
       reasoning: body.reasoning === undefined ? pending?.execution.reasoning : body.reasoning,
       text: body.text === undefined ? pending?.execution.text : body.text,
       response_format: body.response_format === undefined ? pending?.execution.response_format : body.response_format,
+      service_tier: body.service_tier === undefined ? pending?.execution.service_tier : body.service_tier,
     };
-    if (pending && JSON.stringify(execution) !== JSON.stringify(pending.execution)) throw new CallerRequestError("A pending turn must preserve execution mode, reasoning and text format");
+    if (pending && JSON.stringify(execution) !== JSON.stringify(pending.execution)) throw new CallerRequestError("A pending turn must preserve execution mode, reasoning, text format and service tier");
     // Omitted catalog/model is inherited; other execution options on a live turn
     // cannot reconfigure an already running harness.
     if (pending && (pending.model !== resolvedModel || JSON.stringify(pending.tools) !== JSON.stringify(tools))) throw new CallerRequestError("Continuation must preserve model and tool definitions");
